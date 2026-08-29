@@ -1,0 +1,14 @@
+{
+  "name": "sidequest-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Single-port SideQuest live social movement proof of concept",
+  "scripts": {
+    "dev": "docker compose up",
+    "build": "docker compose pull && docker compose config --quiet",
+    "start": "docker compose up -d",
+    "down": "docker compose down",
+    "logs": "docker compose logs -f",
+    "status": "docker compose ps"
+  }
+}

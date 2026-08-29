@@ -1,0 +1,10 @@
+{
+  "name": "sidequest-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Private API for the SideQuest live social movement proof of concept",
+  "main": "server.js",
+  "dependencies": {
+    "pg": "8.13.1"
+  }
+}

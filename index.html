@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0d0d10" />
+    <title>SideQuest — Move together, make it weird.</title>
+    <style>
+      :root {
+        --bg:#0d0d10; --panel:#17171c; --panel2:#202027; --ink:#f8f7f2; --muted:#9d9ba6;
+        --line:#323139; --lime:#dfff5f; --coral:#ff8066; --blue:#72d6ff; --purple:#b89cff;
+      }
+      * { box-sizing:border-box; }
+      html { color-scheme:dark; }
+      body { min-height:100vh; margin:0; color:var(--ink); background:radial-gradient(circle at 80% -10%,rgba(184,156,255,.16),transparent 30rem),var(--bg); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+      button,input,select { font:inherit; }
+      button { color:inherit; }
+      .shell { width:min(100%,92rem); margin:auto; padding:0 clamp(.8rem,3vw,2.4rem) 5.5rem; }
+      .topbar { min-height:4.7rem; display:flex; align-items:center; justify-content:space-between; gap:1rem; }
+      .brand { display:flex; align-items:center; gap:.65rem; font-size:1.12rem; font-weight:950; letter-spacing:-.045em; }
+      .brand-mark { width:2rem; aspect-ratio:1; display:grid; place-items:center; border-radius:.65rem; color:#101014; background:var(--lime); transform:rotate(-7deg); }
+      .tagline { margin-left:.4rem; color:var(--muted); font-size:.72rem; font-weight:650; letter-spacing:0; }
+      .top-actions { display:flex; align-items:center; gap:.55rem; }
+      .demo-pill { padding:.45rem .68rem; border:1px solid rgba(255,128,102,.35); border-radius:99rem; color:var(--coral); background:rgba(255,128,102,.08); font-size:.65rem; font-weight:850; text-transform:uppercase; letter-spacing:.08em; }
+      .avatar { width:2.35rem; aspect-ratio:1; display:grid; place-items:center; border-radius:50%; color:#111; background:var(--lime); font-size:.7rem; font-weight:950; }
+
+      .loading { min-height:70vh; display:grid; place-items:center; text-align:center; }
+      .loading[hidden], .app[hidden] { display:none; }
+      .spinner { width:2rem; aspect-ratio:1; margin:0 auto .8rem; border:3px solid var(--line); border-top-color:var(--lime); border-radius:50%; animation:spin .75s linear infinite; }
+      @keyframes spin { to { transform:rotate(360deg); } }
+      .muted { color:var(--muted); }
+      .error { max-width:34rem; padding:1.25rem; border:1px solid rgba(255,128,102,.4); border-radius:1rem; background:rgba(255,128,102,.07); }
+
+      .intro { display:flex; align-items:end; justify-content:space-between; gap:1rem; margin:.8rem 0 1rem; }
+      .eyebrow { margin:0 0 .45rem; color:var(--lime); font-size:.66rem; font-weight:900; text-transform:uppercase; letter-spacing:.14em; }
+      h1 { margin:0; font-size:clamp(2.2rem,6vw,5.6rem); line-height:.9; letter-spacing:-.075em; }
+      .intro-copy { max-width:30rem; margin:0 0 .2rem; color:var(--muted); line-height:1.5; }
+
+      .live-grid { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(19rem,.5fr); gap:1rem; }
+      .stage { position:relative; min-height:clamp(31rem,68vw,47rem); overflow:hidden; border:1px solid var(--line); border-radius:1.25rem; background:#15171a; }
+      .map-bg { position:absolute; inset:0; width:100%; height:100%; }
+      .stage-shade { position:absolute; inset:0; background:linear-gradient(180deg,rgba(13,13,16,.5),transparent 28%,transparent 58%,rgba(13,13,16,.9)); pointer-events:none; }
+      .stage-top { position:absolute; z-index:4; inset:1rem 1rem auto; display:flex; justify-content:space-between; align-items:center; gap:.5rem; }
+      .live-cluster { display:flex; gap:.45rem; align-items:center; }
+      .live-badge { display:flex; align-items:center; gap:.38rem; padding:.48rem .65rem; border-radius:.55rem; background:#ff4365; font-size:.68rem; font-weight:950; letter-spacing:.08em; }
+      .live-badge::before { content:''; width:.45rem; aspect-ratio:1; border-radius:50%; background:#fff; animation:pulse 1.4s infinite; }
+      @keyframes pulse { 50% { opacity:.35; } }
+      .watchers { padding:.48rem .65rem; border-radius:.55rem; background:rgba(13,13,16,.72); backdrop-filter:blur(8px); font-size:.68rem; font-weight:800; }
+      .stage-actions { display:flex; gap:.45rem; }
+      .icon-button { min-width:2.4rem; min-height:2.4rem; padding:.45rem .65rem; border:1px solid rgba(255,255,255,.18); border-radius:.65rem; background:rgba(13,13,16,.72); backdrop-filter:blur(8px); cursor:pointer; font-size:.72rem; font-weight:850; }
+      .icon-button.live { color:#111; border-color:var(--lime); background:var(--lime); }
+      .member-pin { position:absolute; z-index:2; transform:translate(-50%,-50%); transition:left .7s ease,top .7s ease; }
+      .pin-face { width:3rem; aspect-ratio:1; display:grid; place-items:center; border:3px solid var(--ink); border-radius:50%; color:#111; font-size:1.15rem; box-shadow:0 .5rem 1.5rem rgba(0,0,0,.35); }
+      .pin-name { display:block; width:max-content; max-width:7.5rem; margin:.25rem 0 0 50%; transform:translateX(-50%); padding:.25rem .45rem; border-radius:.4rem; background:rgba(13,13,16,.82); font-size:.59rem; font-weight:850; white-space:nowrap; }
+      .quest-overlay { position:absolute; z-index:4; left:1rem; right:1rem; bottom:1rem; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:1rem; align-items:end; }
+      .room-meta { max-width:37rem; }
+      .room-meta h2 { margin:.25rem 0; font-size:clamp(1.65rem,4vw,3.5rem); line-height:.95; letter-spacing:-.055em; }
+      .host-line { color:#d5d3dc; font-size:.75rem; font-weight:750; }
+      .quest-card { margin-top:.85rem; padding:.85rem; border:1px solid rgba(223,255,95,.28); border-radius:.85rem; background:rgba(13,13,16,.76); backdrop-filter:blur(12px); }
+      .quest-card .label { color:var(--lime); font-size:.61rem; font-weight:950; text-transform:uppercase; letter-spacing:.12em; }
+      .quest-card h3 { margin:.35rem 0 .25rem; font-size:1rem; }
+      .quest-card p { margin:0; color:#cfccd5; font-size:.75rem; line-height:1.45; }
+      .quest-actions { display:flex; gap:.45rem; margin-top:.65rem; }
+      .primary,.secondary,.send-button,.reaction-button { border:0; border-radius:.7rem; cursor:pointer; font-weight:900; }
+      .primary { padding:.75rem 1rem; color:#101014; background:var(--lime); }
+      .secondary { padding:.75rem 1rem; border:1px solid var(--line); background:var(--panel2); }
+      button:disabled { opacity:.5; cursor:wait; }
+      .team-orbit { display:flex; flex-direction:column; align-items:end; gap:.45rem; }
+      .team-total { padding:.8rem .9rem; border:1px solid rgba(255,255,255,.16); border-radius:.8rem; background:rgba(13,13,16,.78); text-align:right; backdrop-filter:blur(10px); }
+      .team-total strong { display:block; font-size:1.4rem; }
+      .team-total span { color:var(--muted); font-size:.62rem; text-transform:uppercase; }
+
+      .live-panel { min-height:31rem; display:grid; grid-template-rows:auto auto minmax(12rem,1fr) auto; border:1px solid var(--line); border-radius:1.25rem; overflow:hidden; background:var(--panel); }
+      .panel-header { padding:1rem; border-bottom:1px solid var(--line); }
+      .panel-header h2 { margin:0; font-size:1rem; }
+      .panel-header p { margin:.3rem 0 0; color:var(--muted); font-size:.68rem; }
+      .reaction-strip { display:grid; grid-template-columns:repeat(6,1fr); gap:.3rem; padding:.65rem; border-bottom:1px solid var(--line); }
+      .reaction-button { min-height:2.5rem; background:var(--panel2); font-size:1rem; }
+      .reaction-button:hover { background:#2c2c34; transform:translateY(-1px); }
+      .feed { overflow:auto; padding:.55rem .8rem; }
+      .message { display:grid; grid-template-columns:2rem minmax(0,1fr); gap:.55rem; padding:.58rem 0; }
+      .message-avatar { width:2rem; aspect-ratio:1; display:grid; place-items:center; border-radius:50%; color:#111; font-size:.8rem; }
+      .message strong { font-size:.72rem; }
+      .message time { margin-left:.35rem; color:#777681; font-size:.58rem; }
+      .message p { margin:.18rem 0 0; color:#d0ced7; font-size:.74rem; line-height:1.35; }
+      .message-emoji { margin-right:.28rem; font-size:.95rem; }
+      .composer { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.45rem; padding:.7rem; border-top:1px solid var(--line); }
+      .composer input { min-width:0; padding:.7rem .75rem; border:1px solid var(--line); border-radius:.65rem; outline:0; background:#111116; }
+      .composer input:focus { border-color:var(--lime); }
+      .send-button { padding:.65rem .8rem; color:#111; background:var(--lime); }
+
+      .metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:.7rem; margin:1rem 0; }
+      .metric { min-height:7.5rem; padding:1rem; border:1px solid var(--line); border-radius:1rem; background:var(--panel); }
+      .metric-label { color:var(--muted); font-size:.63rem; font-weight:850; text-transform:uppercase; letter-spacing:.09em; }
+      .metric-value { display:block; margin:.55rem 0 .2rem; font-size:clamp(1.65rem,4vw,2.55rem); line-height:1; font-weight:950; letter-spacing:-.06em; }
+      .metric-note { color:var(--muted); font-size:.65rem; }
+
+      .content-grid { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(19rem,.85fr); gap:1rem; }
+      .card { padding:1rem; border:1px solid var(--line); border-radius:1rem; background:var(--panel); }
+      .card-header { display:flex; justify-content:space-between; gap:1rem; align-items:start; margin-bottom:.8rem; }
+      .card h2 { margin:0; font-size:1rem; }
+      .card-subtitle { margin:.25rem 0 0; color:var(--muted); font-size:.67rem; }
+      .source-tag { padding:.3rem .5rem; border:1px solid var(--line); border-radius:99rem; color:var(--muted); font-size:.57rem; font-weight:850; text-transform:uppercase; white-space:nowrap; }
+      .room-list { display:grid; gap:.55rem; }
+      .room-row { display:grid; grid-template-columns:.4rem minmax(0,1fr) auto; gap:.75rem; align-items:center; padding:.75rem; border:1px solid var(--line); border-radius:.75rem; background:var(--panel2); }
+      .room-accent { align-self:stretch; border-radius:99rem; }
+      .room-row h3 { margin:0; font-size:.82rem; }
+      .room-row p { margin:.25rem 0 0; color:var(--muted); font-size:.64rem; }
+      .room-numbers { text-align:right; font-size:.65rem; white-space:nowrap; }
+      .room-numbers strong { display:block; color:var(--lime); font-size:.78rem; }
+      .history-chart { min-height:13rem; display:flex; align-items:end; gap:.55rem; padding:.5rem .25rem 0; border-bottom:1px solid var(--line); }
+      .bar-group { flex:1; min-width:0; display:grid; align-content:end; height:11rem; gap:.32rem; text-align:center; }
+      .bar { width:100%; min-height:.25rem; border-radius:.35rem .35rem 0 0; background:var(--blue); }
+      .bar.walk { background:var(--purple); }
+      .bar-value { font-size:.58rem; font-weight:850; }
+      .bar-label { color:var(--muted); font-size:.55rem; white-space:nowrap; }
+      .preferences { display:flex; flex-wrap:wrap; gap:.45rem; margin:.8rem 0 0; }
+      .preference { padding:.45rem .58rem; border:1px solid var(--line); border-radius:.55rem; color:#ceccd5; background:var(--panel2); font-size:.65rem; }
+      .notice { margin:.8rem 0 0; padding:.7rem; border-left:3px solid var(--coral); color:var(--muted); background:rgba(255,128,102,.06); font-size:.64rem; line-height:1.45; }
+
+      .bottom-nav { position:fixed; z-index:20; left:50%; bottom:.8rem; transform:translateX(-50%); display:flex; gap:.25rem; padding:.4rem; border:1px solid var(--line); border-radius:1rem; background:rgba(20,20,25,.9); backdrop-filter:blur(14px); }
+      .nav { min-width:5rem; padding:.55rem .75rem; border:0; border-radius:.65rem; color:var(--muted); background:transparent; font-size:.67rem; font-weight:850; cursor:pointer; }
+      .nav.active { color:#111; background:var(--lime); }
+      .toast { position:fixed; z-index:50; right:1rem; bottom:5rem; max-width:24rem; padding:.85rem 1rem; border:1px solid var(--line); border-radius:.8rem; background:#27272e; box-shadow:0 1rem 3rem rgba(0,0,0,.4); font-size:.75rem; opacity:0; transform:translateY(1rem); pointer-events:none; transition:.2s ease; }
+      .toast.show { opacity:1; transform:translateY(0); }
+
+      @media (max-width:68rem) {
+        .live-grid,.content-grid { grid-template-columns:1fr; }
+        .live-panel { min-height:28rem; }
+        .intro { display:block; }
+        .intro-copy { margin-top:.8rem; }
+      }
+      @media (max-width:42rem) {
+        .shell { padding-inline:.65rem; }
+        .tagline,.demo-pill { display:none; }
+        .stage { min-height:39rem; }
+        .quest-overlay { grid-template-columns:1fr; }
+        .team-orbit { align-items:start; }
+        .team-total { text-align:left; }
+        .metrics { grid-template-columns:1fr 1fr; gap:.45rem; }
+        .metric { min-height:6.8rem; padding:.8rem; }
+        .bottom-nav { width:calc(100% - 1.3rem); }
+        .nav { min-width:0; flex:1; padding-inline:.35rem; }
+      }
+      @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation-duration:.01ms!important; transition-duration:.01ms!important; scroll-behavior:auto!important; } }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand"><span class="brand-mark">↗</span> SideQuest <span class="tagline">Move together. Make it weird.</span></div>
+        <div class="top-actions"><span class="demo-pill">POC · seeded community</span><span class="avatar" id="avatar">AM</span></div>
+      </header>
+
+      <div class="loading" id="loading"><div><div class="spinner"></div><strong>Joining the outside world…</strong><p class="muted">Loading rooms, quests and live movement</p></div></div>
+
+      <main class="app" id="app" hidden>
+        <section class="intro">
+          <div><p class="eyebrow">Social movement, not serious training</p><h1>Outside is better<br/>with witnesses.</h1></div>
+          <p class="intro-copy">Walk, run or wander in a live room. Friends watch, react and help choose whatever ridiculous—but safe—side quest happens next.</p>
+        </section>
+
+        <section class="live-grid">
+          <article class="stage" id="stage">
+            <svg class="map-bg" viewBox="0 0 900 700" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+              <rect width="900" height="700" fill="#15191a"/>
+              <path d="M-40 520 C150 410 235 590 410 455 S690 300 960 405" fill="none" stroke="#292d2d" stroke-width="92"/>
+              <path d="M-40 520 C150 410 235 590 410 455 S690 300 960 405" fill="none" stroke="#7f8580" stroke-width="3" stroke-dasharray="12 16" opacity=".35"/>
+              <path d="M110 -40 C260 170 160 310 360 390 S640 470 770 760" fill="none" stroke="#292d2d" stroke-width="68"/>
+              <path d="M110 -40 C260 170 160 310 360 390 S640 470 770 760" fill="none" stroke="#7f8580" stroke-width="3" stroke-dasharray="10 14" opacity=".3"/>
+              <path d="M620 -20 C570 150 690 220 620 355 S530 570 600 730" fill="none" stroke="#18333e" stroke-width="48" opacity=".9"/>
+              <g fill="#1e3222" opacity=".9"><circle cx="95" cy="140" r="75"/><circle cx="320" cy="145" r="120"/><circle cx="805" cy="170" r="100"/><circle cx="200" cy="620" r="100"/><circle cx="760" cy="580" r="130"/></g>
+              <g fill="#334535" opacity=".6"><circle cx="75" cy="120" r="8"/><circle cx="130" cy="180" r="7"/><circle cx="290" cy="90" r="9"/><circle cx="365" cy="170" r="7"/><circle cx="825" cy="140" r="9"/><circle cx="790" cy="220" r="7"/></g>
+            </svg>
+            <div id="member-pins"></div><div class="stage-shade"></div>
+            <div class="stage-top"><div class="live-cluster"><span class="live-badge">LIVE</span><span class="watchers" id="watchers">◉ — watching</span></div><div class="stage-actions"><select class="icon-button" id="movement-mode" aria-label="Movement mode"><option value="walk">Walk</option><option value="run">Run</option></select><button class="icon-button" id="refresh-button">↻ Live</button><button class="icon-button" id="gps-button">◎ Share GPS</button></div></div>
+            <div class="quest-overlay">
+              <div class="room-meta"><span class="host-line" id="host-line">Hosted by —</span><h2 id="room-title">Loading room…</h2><div class="quest-card" id="quest-card"></div></div>
+              <div class="team-orbit"><div class="team-total"><strong id="team-minutes">—</strong><span>team minutes</span></div><button class="primary" id="generate-button">Generate next quest</button></div>
+            </div>
+          </article>
+
+          <aside class="live-panel">
+            <div class="panel-header"><h2>Live room</h2><p id="room-status">Real reactions stored in Postgres · refreshes every 5s</p></div>
+            <div class="reaction-strip" id="reaction-strip"><button class="reaction-button">🔥</button><button class="reaction-button">👏</button><button class="reaction-button">⚡</button><button class="reaction-button">😂</button><button class="reaction-button">💚</button><button class="reaction-button">🏁</button></div>
+            <div class="feed" id="feed" aria-live="polite"></div>
+            <form class="composer" id="composer"><input id="message-input" maxlength="160" autocomplete="off" placeholder="Egg them on…" aria-label="Message the live room"/><button class="send-button">Send</button></form>
+          </aside>
+        </section>
+
+        <section class="metrics" aria-label="Weekly movement summary">
+          <article class="metric"><span class="metric-label">Moving together</span><strong class="metric-value" id="active-minutes">—</strong><span class="metric-note">minutes in the last 7 days</span></article>
+          <article class="metric"><span class="metric-label">Ground covered</span><strong class="metric-value" id="distance">—</strong><span class="metric-note">walks and runs combined</span></article>
+          <article class="metric"><span class="metric-label">Side quests</span><strong class="metric-value" id="quests-completed">—</strong><span class="metric-note">completed in 7 days</span></article>
+          <article class="metric"><span class="metric-label">Days outside</span><strong class="metric-value" id="active-days">—</strong><span class="metric-note">no pace target required</span></article>
+        </section>
+
+        <section class="content-grid">
+          <article class="card"><div class="card-header"><div><h2>Happening now</h2><p class="card-subtitle">Public demo rooms · joinable through the API</p></div><span class="source-tag">Postgres live state</span></div><div class="room-list" id="room-list"></div></article>
+          <article class="card"><div class="card-header"><div><h2>Your movement mix</h2><p class="card-subtitle">Active minutes per seeded session · walk and run</p></div><span class="source-tag">Demo import</span></div><div class="history-chart" id="history-chart"></div></article>
+          <article class="card"><div class="card-header"><div><h2>Private challenge limits</h2><p class="card-subtitle">Health context influences generation without appearing in the room</p></div><span class="source-tag">Seeded preference</span></div><div class="preferences" id="preferences"></div><p class="notice">The POC uses simple preference rules, not medical interpretation. Every side quest is skippable. Exact GPS is stored only after you press “Share GPS”.</p></article>
+          <article class="card"><div class="card-header"><div><h2>What is real in this POC?</h2><p class="card-subtitle">No static-dashboard sleight of hand</p></div><span class="source-tag">System status</span></div><div class="preferences"><span class="preference">✓ Same-origin API</span><span class="preference">✓ Postgres persistence</span><span class="preference">✓ GPS ingestion</span><span class="preference">✓ Live polling</span><span class="preference">✓ Reaction writes</span><span class="preference">✓ Quest generation audit</span></div><p class="notice" id="generation-note">Quest generation is currently transparent and deterministic. The API contract is ready for an LLM, but no model is being claimed yet.</p></article>
+        </section>
+      </main>
+    </div>
+
+    <nav class="bottom-nav"><button class="nav active">Live</button><button class="nav">Discover</button><button class="nav">History</button><button class="nav">You</button></nav>
+    <div class="toast" id="toast" role="status"></div>
+
+    <script>
+      const DEFAULT_USER_ID='user-alex';
+      const loading=document.querySelector('#loading'); const app=document.querySelector('#app'); const toast=document.querySelector('#toast');
+      let dashboard; let liveRoom; let selectedRoomId='victoria-park-party'; let gpsWatchId=null; let lastGpsUpload=0; let pollTimer=null;
+      const escapeHtml=(value)=>{const node=document.createElement('span');node.textContent=value==null?'':String(value);return node.innerHTML;};
+      const showToast=(message)=>{toast.textContent=message;toast.classList.add('show');clearTimeout(showToast.timer);showToast.timer=setTimeout(()=>toast.classList.remove('show'),3500);};
+      const timeAgo=(value)=>{const seconds=Math.max(0,Math.round((Date.now()-new Date(value))/1000));if(seconds<60)return `${seconds}s`;if(seconds<3600)return `${Math.floor(seconds/60)}m`;return `${Math.floor(seconds/3600)}h`;};
+
+      function pinPositions(locations){
+        if(!locations.length)return [];
+        const lats=locations.map(item=>Number(item.latitude)),lngs=locations.map(item=>Number(item.longitude));
+        const minLat=Math.min(...lats),maxLat=Math.max(...lats),minLng=Math.min(...lngs),maxLng=Math.max(...lngs);
+        return locations.map((item,index)=>({item,left:18+((Number(item.longitude)-minLng)/(maxLng-minLng||1))*64,top:22+(1-(Number(item.latitude)-minLat)/(maxLat-minLat||1))*48+(locations.length===1?index*5:0)}));
+      }
+      function renderRoom(room){
+        liveRoom=room; selectedRoomId=room.id;
+        document.querySelector('#watchers').textContent=`◉ ${room.spectator_count} watching`;
+        document.querySelector('#host-line').textContent=`Hosted by ${room.host_name} · ${room.area_label}`;
+        document.querySelector('#room-title').textContent=room.title;
+        document.querySelector('#team-minutes').textContent=room.members.reduce((sum,member)=>sum+Number(member.active_minutes),0);
+        document.querySelector('#room-status').textContent=`${room.members.length} moving · ${room.reaction_count} reactions · refreshes every 5s`;
+        document.querySelector('#member-pins').innerHTML=pinPositions(room.locations).map(({item,left,top})=>`<div class="member-pin" style="left:${left}%;top:${top}%"><span class="pin-face" style="background:${escapeHtml(item.accent)}">${escapeHtml(item.avatar_emoji)}</span><span class="pin-name">${escapeHtml(item.display_name)}</span></div>`).join('');
+        const quest=room.quests[0];
+        document.querySelector('#quest-card').innerHTML=quest?`<span class="label">Current side quest · ${escapeHtml(quest.difficulty)}</span><h3>${escapeHtml(quest.title)}</h3><p>${escapeHtml(quest.instruction)}</p><div class="quest-actions"><button class="primary" id="complete-button" ${quest.completed_by_user?'disabled':''}>${quest.completed_by_user?'Completed ✓':'We did it'}</button><button class="secondary" id="skip-button">Skip</button></div>`:`<span class="label">Room is waiting</span><h3>No active side quest</h3><p>Generate something playful from the team's movement modes and private challenge limits.</p>`;
+        const completeButton=document.querySelector('#complete-button');if(completeButton)completeButton.addEventListener('click',()=>completeQuest(quest.id));
+        const skipButton=document.querySelector('#skip-button');if(skipButton)skipButton.addEventListener('click',()=>showToast('Skipped with no penalty. Generate a better one.'));
+        document.querySelector('#feed').innerHTML=room.reactions.length?room.reactions.map(item=>`<div class="message"><span class="message-avatar" style="background:${escapeHtml(item.accent)}">${escapeHtml(item.avatar_emoji)}</span><div><strong>${escapeHtml(item.display_name)}</strong><time>${timeAgo(item.created_at)} ago</time><p>${item.emoji?`<span class="message-emoji">${escapeHtml(item.emoji)}</span>`:''}${escapeHtml(item.message||'')}</p></div></div>`).join(''):'<p class="muted">No reactions yet. Be the first.</p>';
+      }
+      function renderDashboard(data){
+        dashboard=data; document.querySelector('#avatar').textContent=data.user.initials;
+        document.querySelector('#active-minutes').textContent=`${data.metrics.active_minutes}m`;document.querySelector('#distance').textContent=`${(Number(data.metrics.distance_meters)/1000).toFixed(1)} km`;document.querySelector('#quests-completed').textContent=data.metrics.quests_completed;document.querySelector('#active-days').textContent=data.metrics.active_days;
+        document.querySelector('#room-list').innerHTML=data.rooms.map(room=>`<button class="room-row" data-room="${escapeHtml(room.id)}" style="text-align:left;color:inherit"><span class="room-accent" style="background:${escapeHtml(room.accent)}"></span><span><h3>${escapeHtml(room.title)}</h3><p>${escapeHtml(room.area_label)} · hosted by ${escapeHtml(room.host_name)}</p></span><span class="room-numbers"><strong>${room.mover_count} moving</strong>${room.spectator_count} watching</span></button>`).join('');
+        const maxMinutes=Math.max(...data.history.map(item=>Number(item.active_minutes)),1);document.querySelector('#history-chart').innerHTML=data.history.map(item=>`<div class="bar-group"><span class="bar-value">${item.active_minutes}m</span><span class="bar ${escapeHtml(item.movement_mode)}" style="height:${Math.max(4,Number(item.active_minutes)/maxMinutes*100)}%" title="${escapeHtml(item.movement_mode)} · ${item.active_minutes} active minutes"></span><span class="bar-label">${new Date(item.occurred_at).toLocaleDateString(undefined,{month:'short',day:'numeric'})}</span></div>`).join('');
+        const preferences=data.preferences;document.querySelector('#preferences').innerHTML=preferences?[`Modes: ${preferences.allowed_modes.join(' + ')}`,`Maximum intensity: ${preferences.maximum_intensity}`,`Avoid: ${preferences.avoid_categories.join(', ')||'nothing set'}`].map(value=>`<span class="preference">${escapeHtml(value)}</span>`).join(''):'<span class="preference">No limits imported</span>';
+        renderRoom(data.liveRoom);
+      }
+      async function loadDashboard(){const response=await fetch('/api/dashboard');const result=await response.json();if(!response.ok)throw new Error(result.error||'Could not load SideQuest.');renderDashboard(result);loading.hidden=true;app.hidden=false;startPolling();}
+      async function refreshRoom(){try{const response=await fetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/live?userId=${DEFAULT_USER_ID}`);const result=await response.json();if(!response.ok)throw new Error(result.error);renderRoom(result.room);}catch(error){showToast(`Live refresh failed: ${error.message}`);}}
+      function startPolling(){clearInterval(pollTimer);pollTimer=setInterval(()=>{if(document.visibilityState==='visible')refreshRoom();},5000);}
+      async function postReaction(emoji,message=''){const response=await fetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/reactions`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:DEFAULT_USER_ID,emoji,message})});const result=await response.json();if(!response.ok)throw new Error(result.error||'Could not react.');await refreshRoom();}
+      async function generateQuest(){const button=document.querySelector('#generate-button');button.disabled=true;button.textContent='Generating…';try{const response=await fetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/sidequests/generate`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const result=await response.json();if(!response.ok)throw new Error(result.error||'Generation failed.');showToast(`Quest generated and audited as run #${result.generationId}.`);await refreshRoom();}catch(error){showToast(error.message);}finally{button.disabled=false;button.textContent='Generate next quest';}}
+      async function completeQuest(questId){try{const response=await fetch(`/api/sidequests/${encodeURIComponent(questId)}/complete`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:DEFAULT_USER_ID})});const result=await response.json();if(!response.ok)throw new Error(result.error||'Could not complete quest.');showToast(result.alreadyCompleted?'Already counted.':'Side quest counted for the team.');await refreshRoom();}catch(error){showToast(error.message);}}
+      async function shareLocation(position){const now=Date.now();if(now-lastGpsUpload<8000)return;lastGpsUpload=now;const response=await fetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/location`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:DEFAULT_USER_ID,latitude:position.coords.latitude,longitude:position.coords.longitude,accuracy:position.coords.accuracy,recordedAt:new Date(position.timestamp).toISOString()})});const result=await response.json();if(!response.ok)throw new Error(result.error||'GPS upload failed.');document.querySelector('#gps-button').textContent=`● GPS ${Math.round(position.coords.accuracy)}m`;document.querySelector('#gps-button').classList.add('live');}
+      async function toggleGps(){const button=document.querySelector('#gps-button');if(gpsWatchId!==null){navigator.geolocation.clearWatch(gpsWatchId);gpsWatchId=null;button.classList.remove('live');button.textContent='◎ Share GPS';showToast('Live GPS sharing stopped.');return;}if(!navigator.geolocation){showToast('This browser does not provide geolocation.');return;}button.disabled=true;button.textContent='Joining…';try{const joinResponse=await fetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/join`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({userId:DEFAULT_USER_ID,movementMode:document.querySelector('#movement-mode').value})});const joinResult=await joinResponse.json();if(!joinResponse.ok)throw new Error(joinResult.error||'Could not join room.');button.textContent='Requesting GPS…';gpsWatchId=navigator.geolocation.watchPosition(position=>shareLocation(position).catch(error=>showToast(error.message)),error=>{showToast(`GPS unavailable: ${error.message}`);navigator.geolocation.clearWatch(gpsWatchId);gpsWatchId=null;button.classList.remove('live');button.textContent='◎ Share GPS';},{enableHighAccuracy:true,maximumAge:3000,timeout:12000});showToast(`Joined as ${joinResult.membership.movement_mode}. GPS sharing requested.`);}catch(error){button.textContent='◎ Share GPS';showToast(error.message);}finally{button.disabled=false;}}
+      document.querySelector('#refresh-button').addEventListener('click',refreshRoom);document.querySelector('#gps-button').addEventListener('click',toggleGps);document.querySelector('#generate-button').addEventListener('click',generateQuest);
+      document.querySelector('#reaction-strip').addEventListener('click',event=>{const button=event.target.closest('button');if(button)postReaction(button.textContent.trim()).catch(error=>showToast(error.message));});
+      document.querySelector('#composer').addEventListener('submit',event=>{event.preventDefault();const input=document.querySelector('#message-input');const message=input.value.trim();if(!message)return;input.value='';postReaction(null,message).catch(error=>showToast(error.message));});
+      document.querySelector('#room-list').addEventListener('click',async event=>{const row=event.target.closest('[data-room]');if(!row)return;selectedRoomId=row.dataset.room;await refreshRoom();document.querySelector('#stage').scrollIntoView({behavior:'smooth'});});
+      document.querySelectorAll('.nav').forEach(button=>button.addEventListener('click',()=>{document.querySelectorAll('.nav').forEach(item=>item.classList.remove('active'));button.classList.add('active');showToast(button.textContent==='Live'?'Live room selected.':`${button.textContent} is the next navigation slice.`);}));
+      loadDashboard().catch(error=>{loading.innerHTML=`<div class="error"><h2>SideQuest is offline</h2><p>${escapeHtml(error.message)}</p><button class="primary" onclick="location.reload()">Try again</button></div>`;});
+    </script>
+  </body>
+</html>

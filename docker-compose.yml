@@ -1,0 +1,82 @@
+name: whisperflow
+
+services:
+  web:
+    image: nginx:1.27-alpine
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      # The only application port published by this host.
+      - "6969:80"
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    # This LXC host cannot load Docker's default AppArmor profile.  Limit the
+    # compatibility override to this demo's containers; do not disable AppArmor
+    # globally on the host.
+    security_opt:
+      - apparmor=unconfined
+    networks:
+      - app
+
+  api:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install --omit=dev --no-audit --no-fund && node server.js"
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-whisperflow}:${POSTGRES_PASSWORD:-change-me-before-any-real-deploy}@db:5432/${POSTGRES_DB:-whisperflow}
+      STRAVA_ACTIVITIES_PATH: /data/strava/activities.csv
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    security_opt:
+      - apparmor=unconfined
+    networks:
+      - app
+    volumes:
+      - ./api:/app
+      # Aggregate runs are imported server-side; the raw export stays private.
+      - ./db/data/strava:/data/strava:ro
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-whisperflow}
+      POSTGRES_USER: ${POSTGRES_USER:-whisperflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-before-any-real-deploy}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    security_opt:
+      - apparmor=unconfined
+    networks:
+      - app
+
+networks:
+  app:
+    driver: bridge
+
+volumes:
+  postgres_data:

@@ -1,0 +1,26 @@
+# Dependencies and build output
+node_modules/
+dist/
+build/
+coverage/
+.cache/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+.secrets/
+*.pem
+*.key
+
+# Local containers, database data, and logs
+postgres-data/
+db/data/strava/
+db/data/strava.zip
+*.log
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*.swp

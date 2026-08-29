@@ -1,0 +1,10 @@
+.git
+.gitignore
+node_modules
+dist
+build
+coverage
+.env
+.env.*
+postgres-data
+npm-debug.log*
