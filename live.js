@@ -58,9 +58,15 @@
   let chunkSendChain = Promise.resolve();
   let recorderDataSeen = 0;
   let recorderRequestTimer;
+  let fallbackCaptureTimer;
+  let fallbackCaptureBusy = false;
+  let fallbackCanvas;
+  let fallbackRequested = false;
+  let playbackFallbackTimer;
 
   function switchMode(mode, {manual = true, announce = true} = {}) {
     if (!['me', 'watch'].includes(mode)) return;
+    if (mode === 'me' && (viewerSocket || viewedStream)) closeViewer();
     activeMode = mode;
     if (manual) manualModeChoice = true;
     for (const value of ['me', 'watch']) {
@@ -212,6 +218,29 @@
     }
     if (message.type === 'challenge-response') updateChallenge(message.challenge);
     if (message.type === 'cheer') showReactionOverlay(message.cheer);
+    if (message.type === 'fallback-viewers') setFallbackCapture(Number(message.viewerCount) > 0);
+  }
+
+  function setFallbackCapture(enabled) {
+    clearInterval(fallbackCaptureTimer); fallbackCaptureTimer = null;
+    if (!enabled || !broadcasting || !cameraStream) return;
+    captureFallbackFrame();
+    fallbackCaptureTimer = setInterval(captureFallbackFrame, 350);
+  }
+
+  function captureFallbackFrame() {
+    if (fallbackCaptureBusy || !broadcasting || broadcastSocket?.readyState !== WebSocket.OPEN) return;
+    const video = $('#local-video');
+    if (video.readyState < 2 || !video.videoWidth) return;
+    fallbackCaptureBusy = true;
+    try {
+      fallbackCanvas ||= document.createElement('canvas');
+      const width = Math.min(480, video.videoWidth), height = Math.max(1, Math.round(width * video.videoHeight / video.videoWidth));
+      if (fallbackCanvas.width !== width || fallbackCanvas.height !== height) { fallbackCanvas.width = width; fallbackCanvas.height = height; }
+      fallbackCanvas.getContext('2d', {alpha:false}).drawImage(video, 0, 0, width, height);
+      const data = fallbackCanvas.toDataURL('image/jpeg', .52);
+      if (data.length <= 350000 && broadcastSocket.bufferedAmount < MAX_SOCKET_BACKLOG) broadcastSocket.send(JSON.stringify({type:'fallback-frame', data}));
+    } catch {} finally { fallbackCaptureBusy = false; }
   }
 
   function connectBroadcastSocket({initial = false} = {}) {
@@ -363,7 +392,7 @@
     updateBroadcastUi(false);
     $('#connection-state').textContent = 'Finishing';
     setStatus('#broadcast-status', 'Finishing your run…');
-    clearTimeout(broadcastReconnectTimer); clearInterval(runnerMapTimer); clearInterval(recorderRequestTimer);
+    clearTimeout(broadcastReconnectTimer); clearInterval(runnerMapTimer); clearInterval(recorderRequestTimer); clearInterval(fallbackCaptureTimer);
     if (gpsWatch != null) navigator.geolocation.clearWatch(gpsWatch);
     const streamToStop = broadcastStream;
     const gpsToFinish = gpsSession;
@@ -415,7 +444,7 @@
     const rows = challenges || [];
     $(countTarget).textContent = `${rows.length} ${target === '#broadcast-challenges' ? 'live' : 'sent'}`;
     const isRunner = target === '#broadcast-challenges';
-    $(target).innerHTML = rows.length ? rows.map(item => `<article class="challenge-item"><div class="challenge-item-head"><span>${escapeHtml(item.challenger?.avatarEmoji || '🏃')}</span><strong>${escapeHtml(item.challenger?.displayName || 'A friend')}</strong><b>${(Number(item.pledgeAmountMinor || 0) / 100).toLocaleString(undefined, {style:'currency', currency:item.currency || 'GBP'})}</b></div><p>Next km at ${pace(item.targetPaceSeconds)} · ${escapeHtml(item.charityName)}</p>${isRunner&&item.status==='pledged'?`<div class="challenge-response"><button class="button primary" data-live-response="accepted" data-live-challenge="${escapeHtml(item.id)}">Accept</button><button class="button" data-live-response="declined" data-live-challenge="${escapeHtml(item.id)}">Decline</button></div>`:`<span class="challenge-status">${escapeHtml(item.status)}</span>`}</article>`).join('') : '<div class="empty">None yet.</div>';
+    $(target).innerHTML = rows.length ? rows.map(item => `<article class="challenge-item"><div class="challenge-item-head"><span>${escapeHtml(item.challenger?.avatarEmoji || '🏃')}</span><strong>${escapeHtml(item.challenger?.displayName || 'A friend')}</strong><b>${(Number(item.pledgeAmountMinor || 0) / 100).toLocaleString(undefined, {style:'currency', currency:item.currency || 'GBP'})}</b></div><p><strong>${escapeHtml(item.message || 'Next kilometre challenge')}</strong><br>${pace(item.targetPaceSeconds)} · ${escapeHtml(item.charityName)}</p>${isRunner&&item.status==='pledged'?`<div class="challenge-response"><button class="button primary" data-live-response="accepted" data-live-challenge="${escapeHtml(item.id)}">Accept</button><button class="button" data-live-response="declined" data-live-challenge="${escapeHtml(item.id)}">Decline</button></div>`:`<span class="challenge-status">${escapeHtml(item.status)}</span>`}</article>`).join('') : '<div class="empty">None yet.</div>';
     document.querySelectorAll('[data-live-response]').forEach(button => button.onclick = () => respondLiveChallenge(button.dataset.liveChallenge, button.dataset.liveResponse));
   }
 
@@ -423,7 +452,7 @@
     const overlay = $('#broadcast-challenge-overlay');
     const money = (Number(challenge.pledgeAmountMinor || 0) / 100).toLocaleString(undefined, {style:'currency', currency:challenge.currency || 'GBP'});
     const card = document.createElement('div'); card.className = 'overlay-card';
-    card.innerHTML = `<strong>${escapeHtml(challenge.challenger.displayName)} challenged ${money}</strong><span>Next km · ${pace(challenge.targetPaceSeconds)} · ${escapeHtml(challenge.charityName)}</span><span>Only if comfortable—safety stops count.</span>`;
+    card.innerHTML = `<strong>${escapeHtml(challenge.challenger.displayName)} challenged ${money}</strong><span>${escapeHtml(challenge.message || 'Next kilometre challenge')} · ${pace(challenge.targetPaceSeconds)} · ${escapeHtml(challenge.charityName)}</span><span>Only if comfortable—safety stops count.</span>`;
     overlay.prepend(card); setTimeout(() => card.remove(), 6500);
   }
 
@@ -440,6 +469,7 @@
     if (message.type === 'cheer') { viewedStream.cheers ||= []; viewedStream.cheers.unshift(message.cheer); renderCheers(viewedStream.cheers); }
     if (message.type === 'challenge') addChallenge(message.challenge);
     if (message.type === 'challenge-response') updateChallenge(message.challenge);
+    if (message.type === 'fallback-frame') showFallbackFrame(message.data);
     if (message.type === 'broadcaster-offline') { $('#watch-connection').textContent = 'Runner reconnecting'; setStatus('#watch-status', 'The runner is reconnecting…'); }
     if (message.type === 'broadcaster-online') { $('#watch-connection').textContent = 'Connected'; setStatus('#watch-status', 'Connected at the live edge. Video starts muted—tap Unmute for sound.'); }
     if (message.type === 'stream-ended') {
@@ -448,12 +478,33 @@
     }
   }
 
+  function requestFrameFallback(reason) {
+    clearTimeout(playbackFallbackTimer);
+    if (fallbackRequested || viewerSocket?.readyState !== WebSocket.OPEN) return;
+    fallbackRequested = true;
+    viewerSocket.send(JSON.stringify({type:'fallback-request'}));
+    $('#watch-connection').textContent = 'Compatibility mode';
+    $('#remote-empty').classList.remove('hidden');
+    $('#remote-empty').textContent = 'Connecting a phone-compatible video fallback…';
+    setStatus('#watch-status', `${reason} Switching to the universal compatibility feed…`);
+  }
+
+  function showFallbackFrame(data) {
+    if (!/^data:image\/jpeg;base64,/.test(data || '')) return;
+    const image = $('#remote-fallback');
+    image.src = data; image.classList.remove('hidden');
+    $('#remote-video').classList.add('hidden'); $('#remote-empty').classList.add('hidden');
+    $('#watch-connection').textContent = 'Connected';
+    setStatus('#watch-status', 'Connected in phone compatibility mode. Video is live at a reduced frame rate.');
+  }
+
   function connectViewerSocket() {
     if (!viewedStream || leavingViewer) return;
     const socket = new WebSocket(wsUrl(viewedStream.id, 'viewer'));
     viewerSocket = socket; socket.binaryType = 'arraybuffer';
     socket.onopen = () => {
       if (socket !== viewerSocket) return;
+      fallbackRequested = false;
       viewerReconnectAttempts = 0; $('#watch-connection').textContent = 'Connected';
       setStatus('#watch-status', 'Connected at the live edge. Video starts muted—tap Unmute for sound.');
     };
@@ -473,6 +524,7 @@
       if (!viewedStream || leavingViewer) return;
       try {
         const latest = await api(`/api/live/streams/${viewedStream.id}`);
+        if (latest.stream.status === 'recovering') { setStatus('#watch-status', 'The runner is reconnecting after a service restart…'); scheduleViewerReconnect(); return; }
         if (latest.stream.status !== 'live') { handleViewerMessage({type:'stream-ended'}); return; }
         resetMediaSource(); connectViewerSocket();
       } catch { scheduleViewerReconnect(); }
@@ -483,8 +535,7 @@
     resetMediaSource();
     const MediaSourceClass = window.ManagedMediaSource || window.MediaSource;
     if (!MediaSourceClass || (MediaSourceClass.isTypeSupported && !MediaSourceClass.isTypeSupported(mimeType))) {
-      $('#watch-connection').textContent = 'Format unsupported';
-      setStatus('#watch-status', 'This phone cannot play the runner’s live format. Update Safari or Chrome.');
+      requestFrameFallback('This phone cannot decode the runner’s primary stream.');
       return;
     }
     try {
@@ -496,16 +547,22 @@
           sourceBuffer = mediaSource.addSourceBuffer(mimeType);
           try { sourceBuffer.mode = 'sequence'; } catch {}
           sourceBuffer.addEventListener('updateend', appendMedia);
-          sourceBuffer.addEventListener('error', () => setStatus('#watch-status', 'Live video is reconnecting after a decode error…'));
+          sourceBuffer.addEventListener('error', () => requestFrameFallback('The primary video decoder stopped.'));
           appendMedia();
-        } catch (error) { setStatus('#watch-status', `Video format unavailable: ${error.message}`); }
+        } catch (error) { requestFrameFallback(`Video format unavailable: ${error.message}.`); }
       }, {once:true});
-    } catch (error) { setStatus('#watch-status', `Video could not initialise: ${error.message}`); }
+      playbackFallbackTimer = setTimeout(() => {
+        const video = $('#remote-video');
+        if (video.readyState < 2 || !video.buffered.length) requestFrameFallback('The primary video did not start.');
+      }, 4500);
+    } catch (error) { requestFrameFallback(`Video could not initialise: ${error.message}.`); }
   }
 
   function resetMediaSource() {
+    clearTimeout(playbackFallbackTimer); fallbackRequested = false;
     mediaQueue = []; sourceBuffer = null; mediaSource = null;
-    const video = $('#remote-video'); video.removeAttribute('src'); video.load();
+    const video = $('#remote-video'); video.removeAttribute('src'); video.srcObject = null; video.classList.remove('hidden'); video.load();
+    const fallback = $('#remote-fallback'); if (fallback) { fallback.removeAttribute('src'); fallback.classList.add('hidden'); }
     if (mediaObjectUrl) URL.revokeObjectURL(mediaObjectUrl);
     mediaObjectUrl = '';
   }
@@ -513,7 +570,6 @@
   function queueMedia(chunk) {
     mediaQueue.push(chunk);
     if (mediaQueue.length > MAX_PENDING_MEDIA) mediaQueue = sourceBuffer ? mediaQueue.slice(-12) : [mediaQueue[0], ...mediaQueue.slice(-11)];
-    $('#remote-empty').classList.add('hidden');
     appendMedia();
     $('#remote-video').play().catch(() => {});
   }
@@ -576,7 +632,7 @@
     event.preventDefault(); if (!viewedStream) return;
     const button = event.submitter || event.currentTarget.querySelector('button'); button.disabled = true;
     try {
-      const result = await post(`/api/live/streams/${viewedStream.id}/challenges`, {amountMinor:Math.round(Number($('#live-challenge-amount').value) * 100), currency:'GBP'});
+      const result = await post(`/api/live/streams/${viewedStream.id}/challenges`, {amountMinor:Math.round(Number($('#live-challenge-amount').value) * 100), currency:'GBP', taskType:$('#live-challenge-type').value, message:$('#live-challenge-message').value});
       addChallenge(result.challenge);
       setStatus('#watch-status', 'Challenge delivered to the runner. No payment was charged.');
     } catch (error) { setStatus('#watch-status', error.message); }
@@ -626,6 +682,19 @@
   function bindUi() {
     $('#runner-stage .stage-stats').classList.add('stats');
     $('.feed-heading h2').textContent = 'Friends running now';
+    const remoteFallback = document.createElement('img');
+    remoteFallback.id = 'remote-fallback'; remoteFallback.className = 'fallback-frame hidden'; remoteFallback.alt = 'Live compatibility feed from the runner';
+    $('#remote-video').insertAdjacentElement('afterend', remoteFallback);
+    const challengeForm = $('#live-challenge-form');
+    challengeForm.classList.add('dynamic-challenge-compose');
+    challengeForm.insertAdjacentHTML('afterbegin', `<select id="live-challenge-type" aria-label="Challenge type"><option value="pace-boost">Pace boost · next km</option><option value="hold-steady">Hold steady · next km</option><option value="finish-strong">Finish strong · 1 minute</option><option value="custom">Custom challenge</option></select><input id="live-challenge-message" maxlength="120" value="Push the next kilometre just above your recent average" aria-label="Challenge message">`);
+    $('#live-challenge-type').onchange = event => {
+      const messages = {'pace-boost':'Push the next kilometre just above your recent average','hold-steady':'Hold a comfortable, steady pace for the next kilometre','finish-strong':'Finish the next controlled minute feeling strong','custom':''};
+      $('#live-challenge-message').value = messages[event.target.value];
+      if (event.target.value === 'custom') $('#live-challenge-message').focus();
+    };
+    $('#remote-video').addEventListener('playing', () => { clearTimeout(playbackFallbackTimer); $('#remote-empty').classList.add('hidden'); $('#remote-fallback').classList.add('hidden'); $('#remote-video').classList.remove('hidden'); });
+    $('#remote-video').addEventListener('error', () => requestFrameFallback('The primary video could not be decoded.'));
     document.querySelectorAll('[data-mode]').forEach(button => button.onclick = () => switchMode(button.dataset.mode));
     $('#broadcast-form').onsubmit = startBroadcast;
     $('#stop-button').onclick = stopBroadcast; $('#stage-stop-button').onclick = stopBroadcast;
