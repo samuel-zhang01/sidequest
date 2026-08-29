@@ -1,88 +1,91 @@
-# SideQuest
+# SideQuest Loop
 
-SideQuest is a live social movement game for people who find exercising alone
-boring. Friends can walk or run together in a shared room, broadcast GPS
-position, react in real time and complete playful generated side quests. It is
-not a professional pace tracker or an AI coach.
+SideQuest Loop is a peer-powered running feedback system. It turns running
+observations into a measurable question, proposes a bounded intervention,
+uses friends to create commitment, records the outcome and updates the next
+evidence state.
 
-The current proof of concept is live at
-<https://genesis.hiddenlayers.co.uk>.
+The live POC is at <https://genesis.hiddenlayers.co.uk>.
 
-## What works now
+```text
+Observe → Estimate → Ask → Intervene → Rally → Reassess ↺
+```
 
-- Responsive Instagram-Live-style room UI.
-- Seeded public rooms, movement history and private challenge preferences.
-- Real same-origin API backed by Postgres.
-- Room membership, reactions, messages and quest completions persist.
-- Browser `watchPosition` sends validated GPS samples to the backend after the
-  user explicitly enables sharing.
-- The room refreshes from server state every five seconds.
-- The server generates and stores safe side quests using room context and the
-  participating members' private challenge limits.
-- `/health` and `/api/status` expose operational state.
+## What works
 
-Quest generation is deliberately labelled `deterministic-poc`; it uses no
-model or API key yet. The endpoint, context object, stored generation audit and
-UI are ready for a later LLM provider without pretending the current rules are
-AI.
+- A private backend adapter imports aggregate run records from the local Strava
+  export. The current source contains 209 runs; raw export files are never
+  served by Nginx.
+- Live browser GPS sessions send samples through same-origin API routes. The
+  server validates coordinates and plausible speed, derives distance/time/pace
+  and stores the completed session as the same neutral run-observation shape.
+- Spectators can follow an active run on a playful abstract map, switch between
+  follow and overview views, zoom the doodle trail and send persisted cheers.
+  The API rotates and coarsens route geometry; raw coordinates, accuracy and
+  street names never reach the spectator response.
+- The insight layer compares the latest four runs with the prior four, states
+  its evidence coverage and lists measurements that would reduce uncertainty.
+- The intervention layer persists a question, hypothesis, +1 km measurement
+  task, success criteria, fields to collect and a safety stop.
+- Individual friends can send persisted challenges. They see the task and stop
+  rule, not the runner's private evidence details.
+- Distance, moving time, perceived effort and warning symptoms create a stored
+  outcome. Reassessment then creates a new evidence snapshot and closes the loop.
 
-## Run locally
+The generator is honestly labelled `deterministic-poc`; there is no model
+provider yet. Its structured contract can later be implemented by an LLM
+without changing source adapters, peer notifications or outcome handling.
+
+## Run
 
 ```bash
 npm run start
 npm run status
 ```
 
-Open <http://127.0.0.1:6969> or the public HTTPS URL above.
+Open <http://127.0.0.1:6969> locally or the public HTTPS URL above.
 
-```bash
-npm run logs
-npm run down
-```
+## Architecture
 
-`.env` and `.secrets/` remain private and are not served to the browser.
-
-## Service topology
-
-| Service | Exposure | Purpose |
+| Service | Exposure | Responsibility |
 | --- | --- | --- |
-| `web` | Host port `6969` only | Nginx UI and same-origin `/api` gateway. |
-| `api` | Compose network only | Node API, GPS validation, live-room behavior and quest generation. |
-| `db` | Compose network only | Postgres rooms, members, locations, reactions and quests. |
+| `web` | Host port `6969` only | Responsive UI and same-origin API gateway. |
+| `api` | Compose network only | Source adapters, GPS validation, loop engine and writes. |
+| `db` | Compose network only | Observations, snapshots, interventions, notifications and outcomes. |
+
+The API reads `db/data/strava/activities.csv` through a read-only private
+mount. `.env`, `.secrets/` and raw activity files are not exposed to browsers.
 
 ## API proof points
 
 | Route | Behavior |
 | --- | --- |
-| `GET /api/dashboard` | Seeded member context, movement history, rooms and current live room. |
-| `GET /api/rooms/:id/live` | Latest persisted members, GPS positions, quests and reactions. |
-| `POST /api/rooms/:id/join` | Join or resume a room as a walker or runner. |
-| `POST /api/rooms/:id/location` | Validate and store a fresh GPS sample; reject stale or implausible movement. |
-| `POST /api/rooms/:id/reactions` | Store a cheer, emoji or short message. |
-| `POST /api/rooms/:id/sidequests/generate` | Generate and audit a context-aware safe side quest. |
-| `POST /api/sidequests/:id/complete` | Count a completion once per member and update team progress. |
+| `GET /api/feedback-loop` | Return the complete persisted loop and source metadata. |
+| `POST /api/feedback-loop/analyse` | Create a structured running-evidence snapshot. |
+| `POST /api/feedback-loop/interventions` | Generate and audit a measurable intervention. |
+| `POST /api/interventions/:id/share` | Persist a friend-to-runner challenge. |
+| `POST /api/interventions/:id/accept` | Accept the measurement task. |
+| `POST /api/interventions/:id/result` | Store distance, time, effort and symptoms. |
+| `POST /api/interventions/:id/reassess` | Turn the result into the next evidence state. |
+| `POST /api/gps-runs/start` | Start a private GPS session. |
+| `POST /api/gps-runs/:id/samples` | Validate a fresh GPS sample and derive live pace. |
+| `POST /api/gps-runs/:id/finish` | Normalize the GPS session into a run observation. |
+| `GET /api/live-map` | Return privacy-preserving doodle points and live run stats. |
+| `POST /api/live-map/cheers` | Persist a spectator cheer on the active run. |
 
-## Data and safety honesty
+## Safety and honesty
 
-- Profiles, history and initial locations are clearly labelled demonstration
-  data.
-- New community actions and GPS samples are real server writes.
-- Exact GPS is not uploaded until the user presses **Share GPS**.
-- Generated challenges exclude categories that active members have privately
-  marked to avoid.
-- Wildlife disturbance, roads, trespass, blind/backwards movement and medical
-  recommendations are outside the generator's allowed behavior.
-- Every side quest is skippable without penalty.
+- The app reports running load and response signals, not diagnoses.
+- A score describes evidence coverage, not health or fitness.
+- One intervention result cannot establish causation or medical safety.
+- Warning symptoms close the peer challenge; the UI never rewards pushing
+  through them.
+- Real Strava aggregates, seeded friends and deterministic generation are
+  labelled separately.
+- Spectators receive an abstract route shape rather than reconstructable map
+  coordinates or named geography.
+- Authentication, Garmin/Strava OAuth, real push delivery and an LLM provider
+  are future work.
 
-## Next vertical slices
-
-1. Replace five-second polling with server-sent events or WebSockets.
-2. Add real authentication and public/friends-only room visibility.
-3. Add voice notes and live voice reactions through a server-side provider.
-4. Add an LLM behind the existing generator contract with structured output
-   validation and the same safety filters.
-5. Add Apple Health/Strava imports with explicit consent and source freshness.
-6. Create replayable room stories after a session ends.
-
-See [`infrastructure.md`](infrastructure.md) for the fixed ingress contract and
-[`judging-criteria/`](judging-criteria/README.md) for the event brief.
+See [`infrastructure.md`](infrastructure.md) for the fixed one-port deployment
+contract and [`judging-criteria/`](judging-criteria/README.md) for the pitch.

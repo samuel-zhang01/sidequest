@@ -2,9 +2,11 @@
   "name": "sidequest-api",
   "version": "0.1.0",
   "private": true,
-  "description": "Private API for the SideQuest live social movement proof of concept",
+  "description": "Private API for the SideQuest running feedback loop",
   "main": "server.js",
   "dependencies": {
-    "pg": "8.13.1"
+    "pg": "8.13.1",
+    "ws": "8.21.3",
+    "zod": "4.1.5"
   }
 }

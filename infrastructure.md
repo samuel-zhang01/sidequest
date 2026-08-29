@@ -235,8 +235,10 @@ the browser-facing URL is HTTPS: Cloudflare terminates that TLS connection.
 * Confirmed: this host owns `192.168.1.3`.
 * Confirmed: authoritative DNS resolves `genesis.hiddenlayers.co.uk` to
   Cloudflare edge addresses.
-* Demo running: `docker-compose.yml` starts the SideQuest web gateway on `6969`,
-  a private Node API, and private Postgres. The engine can fetch
+* Demo running: `docker-compose.yml` starts the SideQuest Loop web gateway on
+  `6969`, a private Node API, and private Postgres. The API privately imports
+  aggregate Strava runs, accepts live GPS samples, and persists the complete
+  feedback loop. The engine can fetch
   `http://192.168.1.3:6969/health` successfully. In this LXC environment its three
   containers use Docker's scoped `apparmor=unconfined` compatibility option;
   AppArmor is not disabled globally.

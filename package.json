@@ -2,7 +2,7 @@
   "name": "sidequest-demo",
   "version": "0.1.0",
   "private": true,
-  "description": "Single-port SideQuest live social movement proof of concept",
+  "description": "Single-port SideQuest peer-powered running feedback loop",
   "scripts": {
     "dev": "docker compose up",
     "build": "docker compose pull && docker compose config --quiet",

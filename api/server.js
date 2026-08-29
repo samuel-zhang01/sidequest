@@ -1,15 +1,18 @@
 const http = require('node:http');
 const fs = require('node:fs');
-const { randomUUID } = require('node:crypto');
+const { createHash, randomBytes, randomUUID } = require('node:crypto');
 const { Pool } = require('pg');
+const { WebSocket, WebSocketServer } = require('ws');
+const { runAgentGodoy } = require('./agent/godoy');
+const { ContextEntryInputSchema, ChallengeUpdateSchema, PledgeInputSchema } = require('./agent/contracts');
 
 const port = Number(process.env.PORT || 8080);
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const stravaPath = process.env.STRAVA_ACTIVITIES_PATH || '/data/strava/activities.csv';
 const defaultUserId = 'user-alex';
 
-function json(response, status, body) {
-  response.writeHead(status, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});
+function json(response, status, body, headers = {}) {
+  response.writeHead(status, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...headers});
   response.end(JSON.stringify(body));
 }
 function bodyJson(request, limit = 100000) {
@@ -23,6 +26,40 @@ function bodyJson(request, limit = 100000) {
 }
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 const round = (value, places = 1) => Math.round(Number(value) * 10 ** places) / 10 ** places;
+const sessionCookie = 'sidequest_session';
+const streamChannels = new Map();
+const hashToken = token => createHash('sha256').update(token).digest('hex');
+const publicUser = user => user && ({id:user.id,displayName:user.display_name,handle:user.handle,initials:user.initials,accent:user.accent,avatarEmoji:user.avatar_emoji});
+function cookies(request) {
+  return String(request.headers.cookie||'').split(';').reduce((result,pair)=>{const split=pair.indexOf('=');if(split<0)return result;result[decodeURIComponent(pair.slice(0,split).trim())]=decodeURIComponent(pair.slice(split+1).trim());return result;},{});
+}
+async function requestUser(request) {
+  const token=cookies(request)[sessionCookie];
+  if(!token)return null;
+  const result=await pool.query(`SELECT u.* FROM user_sessions s JOIN users u ON u.id=s.user_id
+    WHERE s.token_hash=$1 AND s.expires_at>NOW()`,[hashToken(token)]);
+  return result.rows[0]||null;
+}
+function cookieHeader(request,token,maxAge=2592000) {
+  const secure=String(request.headers['x-forwarded-proto']||'').split(',')[0].trim()==='https'||request.headers.host==='genesis.hiddenlayers.co.uk';
+  return `${sessionCookie}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure?'; Secure':''}`;
+}
+async function createSession(request,userId) {
+  const token=randomBytes(32).toString('base64url');
+  await pool.query(`INSERT INTO user_sessions(token_hash,user_id,expires_at) VALUES($1,$2,NOW()+INTERVAL '30 days')`,[hashToken(token),userId]);
+  return cookieHeader(request,token);
+}
+function getStreamChannel(streamId) {
+  if(!streamChannels.has(streamId))streamChannels.set(streamId,{broadcaster:null,viewers:new Set(),chunks:[],cachedBytes:0});
+  return streamChannels.get(streamId);
+}
+function streamSend(socket,payload) {
+  if(socket?.readyState===WebSocket.OPEN)socket.send(typeof payload==='string'?payload:JSON.stringify(payload));
+}
+function streamBroadcast(channel,payload) {
+  for(const viewer of channel.viewers)streamSend(viewer,payload);
+  streamSend(channel.broadcaster,payload);
+}
 const median = values => {
   const sorted = values.filter(Number.isFinite).sort((a,b) => a-b);
   if (!sorted.length) return null;
@@ -57,6 +94,11 @@ async function ensureSchema() {
       initials VARCHAR(3) NOT NULL, accent TEXT NOT NULL, avatar_emoji TEXT NOT NULL,
       demo BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS user_sessions (
+      token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS user_sessions_expiry_idx ON user_sessions(expires_at);
     CREATE TABLE IF NOT EXISTS run_observations (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       source TEXT NOT NULL, external_id TEXT NOT NULL, occurred_at TIMESTAMPTZ NOT NULL,
@@ -83,6 +125,11 @@ async function ensureSchema() {
       status TEXT NOT NULL DEFAULT 'proposed', generated_by TEXT NOT NULL,
       due_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE interventions ADD COLUMN IF NOT EXISTS challenge_description TEXT NOT NULL DEFAULT 'Complete the challenge and record the result.';
+    ALTER TABLE interventions ADD COLUMN IF NOT EXISTS funding_target_minor INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE interventions ADD COLUMN IF NOT EXISTS currency VARCHAR(3) NOT NULL DEFAULT 'GBP';
+    ALTER TABLE interventions ADD COLUMN IF NOT EXISTS settlement_rule TEXT NOT NULL DEFAULT 'Completion requires a recorded outcome; a safety stop is responsible completion.';
+    ALTER TABLE interventions ADD COLUMN IF NOT EXISTS editable_fields JSONB NOT NULL DEFAULT '["title","description","dueAt","stake"]'::jsonb;
     CREATE TABLE IF NOT EXISTS peer_notifications (
       id TEXT PRIMARY KEY, intervention_id TEXT NOT NULL REFERENCES interventions(id) ON DELETE CASCADE,
       sender_user_id TEXT NOT NULL REFERENCES users(id), recipient_user_id TEXT NOT NULL REFERENCES users(id),
@@ -106,11 +153,50 @@ async function ensureSchema() {
       accuracy_meters DOUBLE PRECISION, recorded_at TIMESTAMPTZ NOT NULL
     );
     CREATE INDEX IF NOT EXISTS gps_run_samples_session_time_idx ON gps_run_samples(session_id, recorded_at DESC);
+    CREATE TABLE IF NOT EXISTS live_map_cheers (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES gps_run_sessions(id) ON DELETE CASCADE,
+      sender_user_id TEXT NOT NULL REFERENCES users(id), emoji TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS live_map_cheers_session_time_idx ON live_map_cheers(session_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS live_streams (
+      id TEXT PRIMARY KEY, broadcaster_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL, sponsor_name TEXT NOT NULL, product_name TEXT NOT NULL,
+      product_url TEXT, status TEXT NOT NULL DEFAULT 'live', peak_viewers INTEGER NOT NULL DEFAULT 0,
+      started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ended_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS live_streams_status_time_idx ON live_streams(status,started_at DESC);
+    CREATE TABLE IF NOT EXISTS live_stream_cheers (
+      id TEXT PRIMARY KEY, stream_id TEXT NOT NULL REFERENCES live_streams(id) ON DELETE CASCADE,
+      sender_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, emoji TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS live_stream_cheers_stream_time_idx ON live_stream_cheers(stream_id,created_at DESC);
     CREATE TABLE IF NOT EXISTS engine_runs (
       id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), purpose TEXT NOT NULL,
       mode TEXT NOT NULL, input_context JSONB NOT NULL, result JSONB NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS person_context_entries (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      category TEXT NOT NULL, label TEXT NOT NULL, value TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS person_context_entries_user_time_idx ON person_context_entries(user_id,created_at DESC);
+    CREATE TABLE IF NOT EXISTS agent_assessments (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      output JSONB NOT NULL, engine_mode TEXT NOT NULL, provider TEXT, model TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS agent_assessments_user_time_idx ON agent_assessments(user_id,created_at DESC);
+    CREATE TABLE IF NOT EXISTS challenge_pledges (
+      id TEXT PRIMARY KEY, intervention_id TEXT NOT NULL REFERENCES interventions(id) ON DELETE CASCADE,
+      contributor_name TEXT NOT NULL, contributor_kind TEXT NOT NULL,
+      amount_minor INTEGER NOT NULL, currency VARCHAR(3) NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pledged', demo BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS challenge_pledges_intervention_time_idx ON challenge_pledges(intervention_id,created_at DESC);
   `);
   await pool.query(`
     INSERT INTO users(id,display_name,handle,initials,accent,avatar_emoji,demo) VALUES
@@ -214,6 +300,18 @@ async function analyse(userId,triggerType='analysis',triggerRef=null,postResult=
     [userId,{observationCount:context.summary.run_count,latestRunAt:context.summary.latest_run_at},snapshot]);
   return result.rows[0];
 }
+async function runAndPersistGodoy(userId,{allowModel=true}={}) {
+  const [context,additionalContext]=await Promise.all([
+    observationContext(userId),
+    pool.query('SELECT id,category,label,value,created_at FROM person_context_entries WHERE user_id=$1 ORDER BY created_at DESC LIMIT 40',[userId])
+  ]),snapshot=computeSnapshot(context),agent=await runAgentGodoy({context,snapshot,additionalContext:additionalContext.rows},{allowModel});
+  const id=`assessment-${randomUUID()}`;
+  const stored=await pool.query(`INSERT INTO agent_assessments(id,user_id,output,engine_mode,provider,model)
+    VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,[id,userId,agent.result,agent.mode,agent.provider,agent.model]);
+  await pool.query(`INSERT INTO engine_runs(user_id,purpose,mode,input_context,result) VALUES($1,'agent-godoy',$2,$3,$4)`,
+    [userId,agent.mode,{observationCount:context.summary.run_count,contextEntryCount:additionalContext.rows.length,rawCoordinatesShared:false},agent.result]);
+  return stored.rows[0];
+}
 async function generateIntervention(userId,force=false) {
   if(!force){const active=await pool.query("SELECT * FROM interventions WHERE user_id=$1 AND status IN('proposed','accepted') ORDER BY created_at DESC LIMIT 1",[userId]);if(active.rows[0])return active.rows[0];}
   let snapshot=await pool.query('SELECT * FROM health_snapshots WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1',[userId]);
@@ -234,29 +332,89 @@ async function generateIntervention(userId,force=false) {
   return result.rows[0];
 }
 async function ensureInitialLoop(){const snapshots=await pool.query('SELECT COUNT(*)::int AS count FROM health_snapshots WHERE user_id=$1',[defaultUserId]);if(!snapshots.rows[0].count)await analyse(defaultUserId);
+  const assessments=await pool.query('SELECT COUNT(*)::int AS count FROM agent_assessments WHERE user_id=$1',[defaultUserId]);if(!assessments.rows[0].count)await runAndPersistGodoy(defaultUserId,{allowModel:false});
   const intervention=await generateIntervention(defaultUserId),notifications=await pool.query('SELECT COUNT(*)::int AS count FROM peer_notifications WHERE intervention_id=$1',[intervention.id]);
   if(!notifications.rows[0].count)await pool.query(`INSERT INTO peer_notifications(id,intervention_id,sender_user_id,recipient_user_id,message,demo)
     VALUES($1,$2,'user-mia',$3,'I am holding you to the +1 km — conversational pace, no heroics. 📣',TRUE)`,[`notification-${randomUUID()}`,intervention.id,defaultUserId]);}
 
-async function getLoop(userId){const context=await observationContext(userId);const [user,snapshot,interventionResult,friends]=await Promise.all([
+async function getLoop(userId){const context=await observationContext(userId);const [user,snapshot,interventionResult,friends,assessment,contextEntries]=await Promise.all([
   pool.query('SELECT id,display_name,handle,initials,accent,avatar_emoji FROM users WHERE id=$1',[userId]),
   pool.query('SELECT * FROM health_snapshots WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1',[userId]),
   pool.query('SELECT * FROM interventions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1',[userId]),
-  pool.query('SELECT id,display_name,handle,initials,accent,avatar_emoji FROM users WHERE id<>$1 ORDER BY display_name LIMIT 6',[userId])]);
-  if(!user.rows[0])return null;const intervention=interventionResult.rows[0]||null;let notifications=[],result=null,postSnapshot=null;
+  pool.query('SELECT id,display_name,handle,initials,accent,avatar_emoji FROM users WHERE id<>$1 ORDER BY display_name LIMIT 6',[userId]),
+  pool.query('SELECT * FROM agent_assessments WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1',[userId]),
+  pool.query('SELECT id,category,label,value,created_at FROM person_context_entries WHERE user_id=$1 ORDER BY created_at DESC LIMIT 40',[userId])]);
+  if(!user.rows[0])return null;const intervention=interventionResult.rows[0]||null;let notifications=[],result=null,postSnapshot=null,pledges=[];
   if(intervention){const parts=await Promise.all([pool.query(`SELECT n.*,u.display_name AS sender_name,u.handle AS sender_handle,u.initials AS sender_initials,u.accent AS sender_accent,u.avatar_emoji
       FROM peer_notifications n JOIN users u ON u.id=n.sender_user_id WHERE n.intervention_id=$1 ORDER BY n.created_at DESC`,[intervention.id]),
     pool.query('SELECT * FROM intervention_results WHERE intervention_id=$1 LIMIT 1',[intervention.id]),
-    pool.query("SELECT * FROM health_snapshots WHERE trigger_type='post-intervention' AND trigger_ref=$1 ORDER BY created_at DESC LIMIT 1",[intervention.id])]);
-    notifications=parts[0].rows;result=parts[1].rows[0]||null;postSnapshot=parts[2].rows[0]||null;}
+    pool.query("SELECT * FROM health_snapshots WHERE trigger_type='post-intervention' AND trigger_ref=$1 ORDER BY created_at DESC LIMIT 1",[intervention.id]),
+    pool.query('SELECT * FROM challenge_pledges WHERE intervention_id=$1 ORDER BY created_at DESC',[intervention.id])]);
+    notifications=parts[0].rows;result=parts[1].rows[0]||null;postSnapshot=parts[2].rows[0]||null;pledges=parts[3].rows;}
   const summary=context.summary,sourceLabel=Number(summary.strava_runs)>0?'Strava data export':Number(summary.gps_runs)>0?'Live GPS':'Seeded fallback';
   return {ok:true,user:user.rows[0],source:{label:sourceLabel,adapter:Number(summary.strava_runs)>0?'strava-export-v1':'neutral-observation-v1',runCount:summary.run_count,
     firstRunAt:summary.first_run_at,latestRunAt:summary.latest_run_at,heartRateRuns:summary.heart_rate_runs,rpeRuns:summary.rpe_runs,gpsRuns:summary.gps_runs,
     freshnessDays:summary.latest_run_at?Math.floor((Date.now()-new Date(summary.latest_run_at))/86400000):null,grain:'One aggregate record per run; raw export files remain server-side'},
-    observations:context.observations,snapshot:snapshot.rows[0]||null,intervention,notifications,result,postSnapshot,friends:friends.rows,
+    observations:context.observations,snapshot:snapshot.rows[0]||null,agentAssessment:assessment.rows[0]||null,contextEntries:contextEntries.rows,
+    intervention,notifications,pledges,result,postSnapshot,friends:friends.rows,
     loop:[{key:'observe',label:'Observe',complete:Number(summary.run_count)>0},{key:'estimate',label:'Estimate',complete:Boolean(snapshot.rows[0])},{key:'ask',label:'Ask',complete:Boolean(intervention)},
       {key:'intervene',label:'Intervene',complete:Boolean(intervention&&intervention.status!=='proposed')},{key:'rally',label:'Rally',complete:notifications.length>0},{key:'reassess',label:'Reassess',complete:Boolean(postSnapshot)}],
-    engine:{mode:'deterministic-poc',provider:null,contract:'neutral observations → structured insight/intervention'},disclaimer:'Running signals are not a medical diagnosis and do not establish fitness to exercise.'};}
+    engine:{mode:assessment.rows[0]?.engine_mode||'deterministic-fallback',provider:assessment.rows[0]?.provider||null,model:assessment.rows[0]?.model||null,contract:'neutral observations + user context → validated assessment/questions/interventions'},disclaimer:'Running signals are not a medical diagnosis and do not establish fitness to exercise.'};}
+
+function parseInput(schema,body) {
+  const parsed=schema.safeParse(body);
+  if(!parsed.success)throw new Error(parsed.error.issues.map(issue=>`${issue.path.join('.')||'input'}: ${issue.message}`).join('; '));
+  return parsed.data;
+}
+
+async function adoptGodoyChallenge(userId,candidateId) {
+  const [assessmentResult,snapshotResult,runResult]=await Promise.all([
+    pool.query('SELECT * FROM agent_assessments WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1',[userId]),
+    pool.query('SELECT * FROM health_snapshots WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1',[userId]),
+    pool.query('SELECT distance_meters FROM run_observations WHERE user_id=$1 ORDER BY occurred_at DESC LIMIT 4',[userId])
+  ]),assessment=assessmentResult.rows[0],snapshot=snapshotResult.rows[0];
+  if(!assessment||!snapshot)throw new Error('Run Agent Godoy before choosing a challenge');
+  const candidate=assessment.output.interventions.find(item=>item.id===candidateId);
+  if(!candidate)throw new Error('Challenge candidate not found in the latest assessment');
+  const typical=median(runResult.rows.map(row=>Number(row.distance_meters)))||4000,target=Math.round(clamp(typical,2000,15000)/100)*100;
+  const id=`intervention-${randomUUID()}`,dueAt=new Date(Date.now()+candidate.durationDays*86400000);
+  const result=await pool.query(`INSERT INTO interventions(id,snapshot_id,user_id,title,question,hypothesis,instructions,target_distance_meters,
+      success_criteria,measures_to_collect,safety_stop,generated_by,due_at,challenge_description,funding_target_minor,currency,settlement_rule,editable_fields)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
+    [id,snapshot.id,userId,candidate.challenge.title,assessment.output.questions[0].question,candidate.rationale,candidate.instructions,target,
+      JSON.stringify(candidate.successCriteria),JSON.stringify(candidate.measuresToCollect),candidate.safetyStop,assessment.engine_mode,dueAt.toISOString(),
+      candidate.challenge.description,candidate.challenge.fundingCapMinor,candidate.challenge.currency,candidate.challenge.settlementRule,JSON.stringify(candidate.challenge.editableFields)]);
+  return result.rows[0];
+}
+
+function abstractRoute(samples) {
+  if(!samples.length)return [];
+  const origin={latitude:Number(samples[0].latitude),longitude:Number(samples[0].longitude)},latitudeScale=Math.cos(origin.latitude*Math.PI/180);
+  return samples.map((sample,index)=>{
+    const north=(Number(sample.latitude)-origin.latitude)*111320,east=(Number(sample.longitude)-origin.longitude)*111320*latitudeScale;
+    const angle=.61,rotatedX=east*Math.cos(angle)-north*Math.sin(angle),rotatedY=east*Math.sin(angle)+north*Math.cos(angle);
+    return {x:round(rotatedX/12+Math.sin(index*.83)*.32,2),y:round(rotatedY/12+Math.cos(index*.71)*.26,2)};
+  });
+}
+async function getLiveMap(userId) {
+  const sessionResult=await pool.query(`SELECT s.id,s.status,s.distance_meters,s.moving_seconds,s.started_at,s.ended_at,u.display_name,u.avatar_emoji
+    FROM gps_run_sessions s JOIN users u ON u.id=s.user_id
+    WHERE s.user_id=$1 AND (s.status='active' OR s.ended_at>NOW()-INTERVAL '6 hours')
+    ORDER BY (s.status='active') DESC,s.started_at DESC LIMIT 1`,[userId]),session=sessionResult.rows[0];
+  if(!session)return {ok:true,active:false,runner:null,route:[],cheers:[],message:'Waiting for the runner to start sharing.'};
+  const [sampleResult,cheerResult]=await Promise.all([
+    pool.query(`SELECT latitude,longitude,recorded_at FROM (
+      SELECT latitude,longitude,recorded_at FROM gps_run_samples WHERE session_id=$1 ORDER BY recorded_at DESC LIMIT 180
+    ) samples ORDER BY recorded_at ASC`,[session.id]),
+    pool.query(`SELECT c.id,c.emoji,c.created_at,u.display_name,u.avatar_emoji
+      FROM live_map_cheers c JOIN users u ON u.id=c.sender_user_id WHERE c.session_id=$1 ORDER BY c.created_at DESC LIMIT 8`,[session.id])
+  ]);
+  const samples=sampleResult.rows,distance=Number(session.distance_meters),seconds=Number(session.moving_seconds),pace=distance>=100?seconds/(distance/1000):null;
+  return {ok:true,active:session.status==='active',runner:{displayName:session.display_name,avatarEmoji:session.avatar_emoji},route:abstractRoute(samples),
+    stats:{distanceMeters:round(distance),movingSeconds:seconds,paceSecondsPerKm:pace?Math.round(pace):null,sampleCount:samples.length,
+      updatedAt:samples.at(-1)?.recorded_at||session.started_at,startedAt:session.started_at},cheers:cheerResult.rows,
+    privacy:{streetNames:false,rawCoordinatesExposed:false,description:'Abstract route geometry only; location and street data stay private.'}};
+}
 
 function outcomeFor(intervention,body){const distance=Math.round(Number(body.actualDistanceKm)*1000),seconds=Math.round(Number(body.movingMinutes)*60),rpe=Number(body.perceivedExertion),symptoms=Array.isArray(body.symptoms)?body.symptoms.filter(Boolean).slice(0,8):[];
   if(!Number.isFinite(distance)||distance<100||!Number.isFinite(seconds)||seconds<60)throw new Error('Enter a valid distance and moving time');if(!Number.isFinite(rpe)||rpe<0||rpe>10)throw new Error('Perceived effort must be from 0 to 10');
@@ -265,19 +423,80 @@ function outcomeFor(intervention,body){const distance=Math.round(Number(body.act
   else if(distance>=Number(intervention.target_distance_meters)*.95&&rpe<=5){label='supported';summary=`The ${round(distance/1000)} km signal run met the distance target at ${rpe}/10 effort with no warning symptoms reported.`;}
   return {distance,seconds,rpe,symptoms,label,summary};}
 
+async function liveStreamDetails(streamId) {
+  const [streamResult,cheerResult]=await Promise.all([
+    pool.query(`SELECT s.*,u.display_name,u.handle,u.avatar_emoji,u.accent FROM live_streams s
+      JOIN users u ON u.id=s.broadcaster_user_id WHERE s.id=$1`,[streamId]),
+    pool.query(`SELECT c.id,c.emoji,c.created_at,u.display_name,u.handle,u.avatar_emoji FROM live_stream_cheers c
+      JOIN users u ON u.id=c.sender_user_id WHERE c.stream_id=$1 ORDER BY c.created_at DESC LIMIT 30`,[streamId])
+  ]);
+  const stream=streamResult.rows[0];
+  if(!stream)return null;
+  const channel=streamChannels.get(streamId);
+  return {id:stream.id,status:stream.status,title:stream.title,sponsorName:stream.sponsor_name,productName:stream.product_name,
+    productUrl:stream.product_url,viewerCount:channel?.viewers.size||0,peakViewers:stream.peak_viewers,startedAt:stream.started_at,endedAt:stream.ended_at,
+    broadcaster:{id:stream.broadcaster_user_id,displayName:stream.display_name,handle:stream.handle,avatarEmoji:stream.avatar_emoji,accent:stream.accent},cheers:cheerResult.rows};
+}
+async function requireUser(request,response) {
+  const user=await requestUser(request);
+  if(!user)json(response,401,{error:'Sign in to continue'});
+  return user;
+}
+
 async function handler(request,response){const url=new URL(request.url,'http://api.internal'),path=url.pathname;
   try{
     if(request.method==='GET'&&path==='/health'){await pool.query('SELECT 1');response.writeHead(200,{'Content-Type':'text/plain','Cache-Control':'no-store'});return response.end('ok\n');}
-    if(request.method==='GET'&&path==='/api/status'){await pool.query('SELECT 1');return json(response,200,{ok:true,service:'sidequest-feedback-api',database:'connected',sourceAdapter:fs.existsSync(stravaPath)?'strava-export-v1':'neutral-observation-v1',generationMode:'deterministic-poc',modelProvider:null,diagnosticClaims:false});}
-    if(request.method==='GET'&&path==='/api/feedback-loop'){const loop=await getLoop(url.searchParams.get('userId')||defaultUserId);return loop?json(response,200,loop):json(response,404,{error:'User not found'});}
-    if(request.method==='POST'&&path==='/api/feedback-loop/analyse'){const body=await bodyJson(request),snapshot=await analyse(body.userId||defaultUserId);return json(response,201,{ok:true,snapshot,engine:{mode:'deterministic-poc',provider:null}});}
-    if(request.method==='POST'&&path==='/api/feedback-loop/interventions'){const body=await bodyJson(request),intervention=await generateIntervention(body.userId||defaultUserId,Boolean(body.force));return json(response,201,{ok:true,intervention});}
-    if(request.method==='POST'&&path==='/api/gps-runs/start'){const body=await bodyJson(request),id=`gps-${randomUUID()}`,result=await pool.query('INSERT INTO gps_run_sessions(id,user_id) VALUES($1,$2) RETURNING *',[id,body.userId||defaultUserId]);return json(response,201,{ok:true,session:result.rows[0]});}
+    if(request.method==='GET'&&path==='/api/status'){await pool.query('SELECT 1');return json(response,200,{ok:true,service:'sidequest-feedback-api',database:'connected',sourceAdapter:fs.existsSync(stravaPath)?'strava-export-v1':'neutral-observation-v1',generationMode:'deterministic-poc',modelProvider:null,diagnosticClaims:false,realtime:'websocket-fanout'});}
+    if(request.method==='GET'&&path==='/api/auth/me'){const user=await requestUser(request);return user?json(response,200,{ok:true,user:publicUser(user)}):json(response,401,{error:'Not signed in'});}
+    if(request.method==='POST'&&path==='/api/auth/register'){const body=await bodyJson(request),displayName=String(body.displayName||'').trim().replace(/\s+/g,' '),handle=String(body.handle||'').trim().toLowerCase().replace(/^@/,'');
+      if(displayName.length<2||displayName.length>50)return json(response,400,{error:'Enter a name between 2 and 50 characters'});
+      if(!/^[a-z0-9_]{3,24}$/.test(handle))return json(response,400,{error:'Handle must be 3–24 letters, numbers, or underscores'});
+      const exists=await pool.query('SELECT id FROM users WHERE handle=$1',[`@${handle}`]);if(exists.rows[0])return json(response,409,{error:'That handle is already registered'});
+      const initials=displayName.split(' ').slice(0,2).map(part=>part[0]).join('').toUpperCase(),accents=['#d7ff55','#ff7a66','#67d7ff','#b99cff','#ffd267'],id=`user-${randomUUID()}`;
+      const result=await pool.query(`INSERT INTO users(id,display_name,handle,initials,accent,avatar_emoji,demo) VALUES($1,$2,$3,$4,$5,'🏃',FALSE) RETURNING *`,[id,displayName,`@${handle}`,initials,accents[Math.floor(Math.random()*accents.length)]]),cookie=await createSession(request,id);
+      return json(response,201,{ok:true,user:publicUser(result.rows[0])},{'Set-Cookie':cookie});}
+    if(request.method==='POST'&&path==='/api/auth/login'){const body=await bodyJson(request),handle=String(body.handle||'').trim().toLowerCase().replace(/^@/,'');
+      const result=await pool.query('SELECT * FROM users WHERE handle=$1',[`@${handle}`]);if(!result.rows[0])return json(response,404,{error:'No user has that handle yet'});
+      const cookie=await createSession(request,result.rows[0].id);return json(response,200,{ok:true,user:publicUser(result.rows[0])},{'Set-Cookie':cookie});}
+    if(request.method==='POST'&&path==='/api/auth/logout'){const token=cookies(request)[sessionCookie];if(token)await pool.query('DELETE FROM user_sessions WHERE token_hash=$1',[hashToken(token)]);return json(response,200,{ok:true},{'Set-Cookie':cookieHeader(request,'',0)});}
+    if(request.method==='GET'&&path==='/api/live/streams'){const result=await pool.query(`SELECT id FROM live_streams WHERE status='live' OR ended_at>NOW()-INTERVAL '6 hours' ORDER BY (status='live') DESC,started_at DESC LIMIT 20`),streams=await Promise.all(result.rows.map(row=>liveStreamDetails(row.id)));return json(response,200,{ok:true,streams});}
+    if(request.method==='POST'&&path==='/api/live/streams/start'){const user=await requireUser(request,response);if(!user)return;const body=await bodyJson(request),title=String(body.title||'').trim().slice(0,100),sponsorName=String(body.sponsorName||'').trim().slice(0,80),productName=String(body.productName||'').trim().slice(0,100),productUrl=String(body.productUrl||'').trim().slice(0,500)||null;
+      if(title.length<3||sponsorName.length<2||productName.length<2)return json(response,400,{error:'Add a stream title, sponsor, and featured product'});
+      if(productUrl&&!/^https?:\/\//i.test(productUrl))return json(response,400,{error:'Product link must start with http:// or https://'});
+      await pool.query("UPDATE live_streams SET status='ended',ended_at=NOW() WHERE broadcaster_user_id=$1 AND status='live'",[user.id]);
+      const id=`stream-${randomUUID()}`;await pool.query(`INSERT INTO live_streams(id,broadcaster_user_id,title,sponsor_name,product_name,product_url) VALUES($1,$2,$3,$4,$5,$6)`,[id,user.id,title,sponsorName,productName,productUrl]);return json(response,201,{ok:true,stream:await liveStreamDetails(id)});}
+    const streamDetail=path.match(/^\/api\/live\/streams\/([^/]+)$/);
+    if(request.method==='GET'&&streamDetail){const stream=await liveStreamDetails(streamDetail[1]);return stream?json(response,200,{ok:true,stream}):json(response,404,{error:'Stream not found'});}
+    const streamStop=path.match(/^\/api\/live\/streams\/([^/]+)\/stop$/);
+    if(request.method==='POST'&&streamStop){const user=await requireUser(request,response);if(!user)return;const result=await pool.query("UPDATE live_streams SET status='ended',ended_at=COALESCE(ended_at,NOW()) WHERE id=$1 AND broadcaster_user_id=$2 RETURNING id",[streamStop[1],user.id]);if(!result.rows[0])return json(response,404,{error:'Live stream not found'});const channel=streamChannels.get(streamStop[1]);if(channel){streamBroadcast(channel,{type:'stream-ended'});channel.broadcaster?.close(1000,'Stream ended');}return json(response,200,{ok:true});}
+    const streamCheer=path.match(/^\/api\/live\/streams\/([^/]+)\/cheers$/);
+    if(request.method==='POST'&&streamCheer){const user=await requireUser(request,response);if(!user)return;const body=await bodyJson(request),emoji=String(body.emoji||'');if(!['🔥','👏','⚡','💚','🎉'].includes(emoji))return json(response,400,{error:'Choose an available cheer'});
+      const active=await pool.query("SELECT id FROM live_streams WHERE id=$1 AND status='live'",[streamCheer[1]]);if(!active.rows[0])return json(response,409,{error:'This stream has ended'});
+      const result=await pool.query('INSERT INTO live_stream_cheers(id,stream_id,sender_user_id,emoji) VALUES($1,$2,$3,$4) RETURNING *',[`stream-cheer-${randomUUID()}`,streamCheer[1],user.id,emoji]),event={type:'cheer',cheer:{...result.rows[0],display_name:user.display_name,handle:user.handle,avatar_emoji:user.avatar_emoji}};const channel=streamChannels.get(streamCheer[1]);if(channel)streamBroadcast(channel,event);return json(response,201,{ok:true,cheer:event.cheer});}
+    if(request.method==='GET'&&path==='/api/feedback-loop'){const signedIn=await requestUser(request),loop=await getLoop(signedIn?.id||url.searchParams.get('userId')||defaultUserId);return loop?json(response,200,loop):json(response,404,{error:'User not found'});}
+    if(request.method==='GET'&&path==='/api/agent-godoy/export'){const signedIn=await requestUser(request),userId=signedIn?.id||url.searchParams.get('userId')||defaultUserId,loop=await getLoop(userId);if(!loop)return json(response,404,{error:'User not found'});
+      const payload={exportedAt:new Date().toISOString(),schemaVersion:'agent-godoy-v1',user:{id:loop.user.id,displayName:loop.user.display_name},source:loop.source,
+        additionalContext:loop.contextEntries,assessment:loop.agentAssessment,activeChallenge:loop.intervention,pledges:loop.pledges,disclaimer:loop.disclaimer};
+      response.writeHead(200,{'Content-Type':'application/json; charset=utf-8','Content-Disposition':'attachment; filename="agent-godoy-export.json"','Cache-Control':'no-store'});return response.end(JSON.stringify(payload,null,2));}
+    if(request.method==='POST'&&path==='/api/agent-godoy/analyse'){const user=await requireUser(request,response);if(!user)return;await bodyJson(request);await analyse(user.id);const assessment=await runAndPersistGodoy(user.id,{allowModel:true});return json(response,201,{ok:true,assessment});}
+    if(request.method==='POST'&&path==='/api/context'){const user=await requireUser(request,response);if(!user)return;const body=await bodyJson(request),userId=user.id,entry=parseInput(ContextEntryInputSchema,{category:body.category,label:body.label,value:body.value});
+      const result=await pool.query(`INSERT INTO person_context_entries(id,user_id,category,label,value) VALUES($1,$2,$3,$4,$5) RETURNING *`,[`context-${randomUUID()}`,userId,entry.category,entry.label,entry.value]);return json(response,201,{ok:true,entry:result.rows[0]});}
+    const adopt=path.match(/^\/api\/agent-godoy\/challenges\/([^/]+)\/adopt$/);
+    if(request.method==='POST'&&adopt){const user=await requireUser(request,response);if(!user)return;await bodyJson(request);const intervention=await adoptGodoyChallenge(user.id,decodeURIComponent(adopt[1]));return json(response,201,{ok:true,intervention});}
+    if(request.method==='GET'&&path==='/api/live-map'){const map=await getLiveMap(url.searchParams.get('userId')||defaultUserId);return json(response,200,map);}
+    if(request.method==='POST'&&path==='/api/live-map/cheers'){const user=await requireUser(request,response);if(!user)return;const body=await bodyJson(request),runnerId=String(body.runnerUserId||defaultUserId),senderId=user.id,emoji=String(body.emoji||'');
+      if(!['🔥','👏','⚡','💚'].includes(emoji))return json(response,400,{error:'Choose an available cheer'});
+      const session=await pool.query("SELECT id FROM gps_run_sessions WHERE user_id=$1 AND status='active' ORDER BY started_at DESC LIMIT 1",[runnerId]);if(!session.rows[0])return json(response,409,{error:'The runner is not live yet'});
+      const sender=await pool.query('SELECT id FROM users WHERE id=$1',[senderId]);if(!sender.rows[0])return json(response,400,{error:'Spectator not found'});
+      const cheer=await pool.query('INSERT INTO live_map_cheers(id,session_id,sender_user_id,emoji) VALUES($1,$2,$3,$4) RETURNING *',[`cheer-${randomUUID()}`,session.rows[0].id,senderId,emoji]);return json(response,201,{ok:true,cheer:cheer.rows[0]});}
+    if(request.method==='POST'&&path==='/api/feedback-loop/analyse'){const user=await requireUser(request,response);if(!user)return;await bodyJson(request);const snapshot=await analyse(user.id);return json(response,201,{ok:true,snapshot,engine:{mode:'deterministic-poc',provider:null}});}
+    if(request.method==='POST'&&path==='/api/feedback-loop/interventions'){const user=await requireUser(request,response);if(!user)return;const body=await bodyJson(request),intervention=await generateIntervention(user.id,Boolean(body.force));return json(response,201,{ok:true,intervention});}
+    if(request.method==='POST'&&path==='/api/gps-runs/start'){const user=await requireUser(request,response);if(!user)return;await bodyJson(request);const id=`gps-${randomUUID()}`,result=await pool.query('INSERT INTO gps_run_sessions(id,user_id) VALUES($1,$2) RETURNING *',[id,user.id]);return json(response,201,{ok:true,session:result.rows[0]});}
     const sample=path.match(/^\/api\/gps-runs\/([^/]+)\/samples$/);
-    if(request.method==='POST'&&sample){const body=await bodyJson(request),latitude=Number(body.latitude),longitude=Number(body.longitude),accuracy=body.accuracy==null?null:Number(body.accuracy),recordedAt=new Date(body.recordedAt||Date.now());
+    if(request.method==='POST'&&sample){const user=await requireUser(request,response);if(!user)return;const body=await bodyJson(request),latitude=Number(body.latitude),longitude=Number(body.longitude),accuracy=body.accuracy==null?null:Number(body.accuracy),recordedAt=new Date(body.recordedAt||Date.now());
       if(!Number.isFinite(latitude)||latitude < -90||latitude > 90||!Number.isFinite(longitude)||longitude < -180||longitude > 180)return json(response,400,{error:'Invalid coordinates'});
       if(!Number.isFinite(recordedAt.getTime())||Math.abs(Date.now()-recordedAt.getTime())>300000)return json(response,400,{error:'GPS sample must be fresh'});
-      const session=await pool.query("SELECT * FROM gps_run_sessions WHERE id=$1 AND status='active'",[sample[1]]);if(!session.rows[0])return json(response,404,{error:'Active GPS run not found'});
+      const session=await pool.query("SELECT * FROM gps_run_sessions WHERE id=$1 AND user_id=$2 AND status='active'",[sample[1],user.id]);if(!session.rows[0])return json(response,404,{error:'Active GPS run not found'});
       const previous=await pool.query('SELECT latitude,longitude,recorded_at FROM gps_run_samples WHERE session_id=$1 ORDER BY recorded_at DESC LIMIT 1',[sample[1]]);let added=0,seconds=0;
       if(previous.rows[0]){seconds=(recordedAt-new Date(previous.rows[0].recorded_at))/1000;const distance=haversine({latitude:Number(previous.rows[0].latitude),longitude:Number(previous.rows[0].longitude)},{latitude,longitude}),speed=seconds>0?distance/seconds:Infinity;
         if(seconds>0&&seconds<=120&&speed<=12&&distance<=600&&(accuracy==null||accuracy<=100))added=distance;else seconds=0;}
@@ -285,8 +504,9 @@ async function handler(request,response){const url=new URL(request.url,'http://a
       const updated=await pool.query('UPDATE gps_run_sessions SET distance_meters=distance_meters+$2,moving_seconds=moving_seconds+$3 WHERE id=$1 RETURNING *',[sample[1],added,Math.round(seconds)]),s=updated.rows[0];
       const pace=Number(s.distance_meters)>=100?Number(s.moving_seconds)/(Number(s.distance_meters)/1000):null;return json(response,201,{ok:true,session:s,acceptedDistanceMeters:round(added),paceSecondsPerKm:pace&&Math.round(pace)});}
     const finish=path.match(/^\/api\/gps-runs\/([^/]+)\/finish$/);
-    if(request.method==='POST'&&finish){const body=await bodyJson(request),sessionResult=await pool.query("UPDATE gps_run_sessions SET status='complete',ended_at=NOW() WHERE id=$1 AND status='active' RETURNING *",[finish[1]]),session=sessionResult.rows[0];
-      if(!session)return json(response,404,{error:'Active GPS run not found'});if(Number(session.distance_meters)<20||Number(session.moving_seconds)<10)return json(response,400,{error:'Not enough accepted GPS movement to create a run observation'});
+    if(request.method==='POST'&&finish){const user=await requireUser(request,response);if(!user)return;const body=await bodyJson(request),active=await pool.query("SELECT * FROM gps_run_sessions WHERE id=$1 AND user_id=$2 AND status='active'",[finish[1],user.id]),candidate=active.rows[0];
+      if(!candidate)return json(response,404,{error:'Active GPS run not found'});if(Number(candidate.distance_meters)<20||Number(candidate.moving_seconds)<10)return json(response,400,{error:'Not enough accepted GPS movement to create a run observation'});
+      const sessionResult=await pool.query("UPDATE gps_run_sessions SET status='complete',ended_at=NOW() WHERE id=$1 AND status='active' RETURNING *",[finish[1]]),session=sessionResult.rows[0];if(!session)return json(response,409,{error:'GPS run was already finished'});
       const rpe=Number(body.perceivedExertion),observation=await pool.query(`INSERT INTO run_observations(id,user_id,source,external_id,occurred_at,distance_meters,moving_seconds,perceived_exertion,demo)
         VALUES($1,$2,'gps-live',$3,$4,$5,$6,$7,FALSE) ON CONFLICT(source,external_id) DO UPDATE SET perceived_exertion=EXCLUDED.perceived_exertion RETURNING *`,
         [`observation-${session.id}`,session.user_id,session.id,session.started_at,session.distance_meters,session.moving_seconds,Number.isFinite(rpe)&&rpe>=0&&rpe<=10?rpe:null]);return json(response,201,{ok:true,observation:observation.rows[0]});}
@@ -296,6 +516,12 @@ async function handler(request,response){const url=new URL(request.url,'http://a
         VALUES($1,$2,$3,$4,$5) RETURNING *`,[`notification-${randomUUID()}`,share[1],senderId,body.userId||defaultUserId,message]);return json(response,201,{ok:true,notification:result.rows[0]});}
     const accept=path.match(/^\/api\/interventions\/([^/]+)\/accept$/);
     if(request.method==='POST'&&accept){const result=await pool.query("UPDATE interventions SET status='accepted' WHERE id=$1 AND status='proposed' RETURNING *",[accept[1]]);return result.rows[0]?json(response,200,{ok:true,intervention:result.rows[0]}):json(response,409,{error:'Intervention is not awaiting acceptance'});}
+    const challengeUpdate=path.match(/^\/api\/interventions\/([^/]+)\/challenge$/);
+    if(request.method==='PATCH'&&challengeUpdate){const body=parseInput(ChallengeUpdateSchema,await bodyJson(request)),result=await pool.query(`UPDATE interventions SET title=$2,challenge_description=$3,due_at=$4,funding_target_minor=$5,currency=$6 WHERE id=$1 RETURNING *`,
+      [challengeUpdate[1],body.title,body.description,body.dueAt,body.fundingTargetMinor,body.currency]);return result.rows[0]?json(response,200,{ok:true,intervention:result.rows[0]}):json(response,404,{error:'Intervention not found'});}
+    const pledge=path.match(/^\/api\/interventions\/([^/]+)\/pledges$/);
+    if(request.method==='POST'&&pledge){const body=parseInput(PledgeInputSchema,await bodyJson(request)),intervention=await pool.query('SELECT currency FROM interventions WHERE id=$1',[pledge[1]]);if(!intervention.rows[0])return json(response,404,{error:'Intervention not found'});if(intervention.rows[0].currency!==body.currency)return json(response,400,{error:`This challenge uses ${intervention.rows[0].currency}`});
+      const result=await pool.query(`INSERT INTO challenge_pledges(id,intervention_id,contributor_name,contributor_kind,amount_minor,currency) VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,[`pledge-${randomUUID()}`,pledge[1],body.contributorName,body.contributorKind,body.amountMinor,body.currency]);return json(response,201,{ok:true,pledge:result.rows[0],paymentStatus:'pledge-only-not-charged'});}
     const resultMatch=path.match(/^\/api\/interventions\/([^/]+)\/result$/);
     if(request.method==='POST'&&resultMatch){const body=await bodyJson(request),interventionResult=await pool.query('SELECT * FROM interventions WHERE id=$1',[resultMatch[1]]);if(!interventionResult.rows[0])return json(response,404,{error:'Intervention not found'});const outcome=outcomeFor(interventionResult.rows[0],body);
       const result=await pool.query(`INSERT INTO intervention_results(id,intervention_id,actual_distance_meters,moving_seconds,perceived_exertion,symptoms,outcome_label,outcome_summary)
@@ -308,5 +534,53 @@ async function handler(request,response){const url=new URL(request.url,'http://a
     return json(response,404,{error:'Route not found'});
   }catch(error){console.error(error);return json(response,/valid|effort|fresh|coordinates/i.test(error.message)?400:500,{error:error.message||'Unexpected server error'});}}
 
-async function start(){await ensureSchema();const source=await importStrava();await seedFallback();await ensureInitialLoop();http.createServer(handler).listen(port,'0.0.0.0',()=>console.log(`SideQuest feedback API listening on ${port}; Strava ${source.available?'available':'unavailable'}, ${source.imported} new runs`));}
+const websocketServer=new WebSocketServer({noServer:true,maxPayload:2*1024*1024});
+websocketServer.on('connection',(socket,request,context)=>{
+  const {streamId,role,user}=context,channel=getStreamChannel(streamId);
+  socket.streamId=streamId;socket.streamRole=role;socket.userId=user.id;
+  if(role==='broadcaster'){
+    channel.broadcaster=socket;
+    streamBroadcast(channel,{type:'broadcaster-online',viewerCount:channel.viewers.size});
+  }else{
+    channel.viewers.add(socket);
+    streamSend(socket,{type:'connected',role,viewerCount:channel.viewers.size,mimeType:channel.mimeType||null});
+    if(channel.mimeType)streamSend(socket,{type:'media-start',mimeType:channel.mimeType,replay:true});
+    for(const chunk of channel.chunks)if(socket.readyState===WebSocket.OPEN)socket.send(chunk,{binary:true});
+    streamBroadcast(channel,{type:'viewer-count',viewerCount:channel.viewers.size});
+    pool.query('UPDATE live_streams SET peak_viewers=GREATEST(peak_viewers,$2) WHERE id=$1',[streamId,channel.viewers.size]).catch(console.error);
+  }
+  socket.on('message',(message,isBinary)=>{
+    if(role!=='broadcaster')return;
+    if(!isBinary){try{const event=JSON.parse(message.toString());if(event.type==='media-start'&&/^video\/webm/i.test(event.mimeType||'')){channel.mimeType=String(event.mimeType).slice(0,120);channel.chunks=[];channel.cachedBytes=0;streamBroadcast(channel,{type:'media-start',mimeType:channel.mimeType});}}catch{}return;}
+    if(message.length>2*1024*1024)return;
+    const chunk=Buffer.from(message);
+    if(channel.cachedBytes+chunk.length<=16*1024*1024){channel.chunks.push(chunk);channel.cachedBytes+=chunk.length;}
+    for(const viewer of channel.viewers)if(viewer.readyState===WebSocket.OPEN&&viewer.bufferedAmount<4*1024*1024)viewer.send(chunk,{binary:true});
+  });
+  socket.on('close',()=>{
+    if(role==='viewer'){
+      channel.viewers.delete(socket);streamBroadcast(channel,{type:'viewer-count',viewerCount:channel.viewers.size});
+    }else if(channel.broadcaster===socket){
+      channel.broadcaster=null;streamBroadcast(channel,{type:'stream-ended'});
+      pool.query("UPDATE live_streams SET status='ended',ended_at=COALESCE(ended_at,NOW()) WHERE id=$1 AND status='live'",[streamId]).catch(console.error);
+    }
+    if(!channel.broadcaster&&!channel.viewers.size)setTimeout(()=>{const current=streamChannels.get(streamId);if(current===channel&&!current.broadcaster&&!current.viewers.size)streamChannels.delete(streamId);},300000);
+  });
+});
+
+async function handleUpgrade(request,socket,head) {
+  try{
+    const url=new URL(request.url,'http://api.internal');
+    if(url.pathname!=='/api/live/ws'){socket.destroy();return;}
+    const user=await requestUser(request),streamId=url.searchParams.get('streamId'),role=url.searchParams.get('role');
+    if(!user||!streamId||!['broadcaster','viewer'].includes(role)){socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');socket.destroy();return;}
+    const result=await pool.query("SELECT broadcaster_user_id,status FROM live_streams WHERE id=$1",[streamId]),stream=result.rows[0];
+    if(!stream||stream.status!=='live'||(role==='broadcaster'&&stream.broadcaster_user_id!==user.id)){socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');socket.destroy();return;}
+    const channel=getStreamChannel(streamId);
+    if(role==='broadcaster'&&channel.broadcaster?.readyState===WebSocket.OPEN){socket.write('HTTP/1.1 409 Conflict\r\nConnection: close\r\n\r\n');socket.destroy();return;}
+    websocketServer.handleUpgrade(request,socket,head,websocket=>websocketServer.emit('connection',websocket,request,{streamId,role,user}));
+  }catch(error){console.error('WebSocket upgrade failed',error);socket.destroy();}
+}
+
+async function start(){await ensureSchema();const source=await importStrava();await seedFallback();await ensureInitialLoop();const server=http.createServer(handler);server.on('upgrade',handleUpgrade);server.listen(port,'0.0.0.0',()=>console.log(`SideQuest feedback API listening on ${port}; Strava ${source.available?'available':'unavailable'}, ${source.imported} new runs`));}
 start().catch(error=>{console.error('Failed to start API',error);process.exit(1);});

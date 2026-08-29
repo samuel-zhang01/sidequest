@@ -11,7 +11,7 @@ idea or team assumption is never mistaken for an event rule.
 | [`event-logistics.md`](event-logistics.md) | Venue, required apps, sponsor-credit setup, packing list, facilities and event-day support. |
 | [`sponsor-challenges.md`](sponsor-challenges.md) | Healf, voice, GTM, cloud and texting challenge briefs. |
 | [`product-ideas.md`](product-ideas.md) | Ranked, architecture-aware concepts and deliberately deferred ideas. |
-| [`judging-criteria.md`](judging-criteria.md) | SideQuest-specific scorecard, demo plan and pitch rehearsal. |
+| [`judging-criteria.md`](judging-criteria.md) | SideQuest Loop scorecard, demo plan and pitch rehearsal. |
 
 ## Source priority
 
