@@ -13,7 +13,12 @@ test('post-login features are separated into a coherent persistent navigation', 
 
   await expect(page.locator('[data-view="home"]')).toBeVisible();
   await expect(page.locator('[data-nav="home"]')).toHaveAttribute('aria-current', 'page');
-  expect(await page.locator('#attention-strip .attention-item').count()).toBeGreaterThan(0);
+  const loop = await page.evaluate(async () => (await fetch('/api/feedback-loop')).json());
+  const social = loop.social;
+  expect(social).not.toHaveProperty('attention');
+  expect(loop.externalEvidenceInterventions[0]).toMatchObject({ id: 'healf-zone-bloods', title: 'Try Healf Bloods' });
+  await expect(page.locator('#attention-strip')).toHaveCount(0);
+  await expect(page.getByText('Needs your attention', {exact:true})).toHaveCount(0);
   await expect(page.locator('#people-row .person-tile').first()).toBeVisible();
   await expect(page.locator('#home-feed .feed-card').first()).toBeVisible();
   await expect(page.locator('#home-feed .feed-card')).toHaveCount(3);
@@ -34,6 +39,11 @@ test('post-login features are separated into a coherent persistent navigation', 
   await expect(page.locator('[data-nav="run"]')).toHaveCount(0);
 
   await page.locator('[data-nav="challenges"]').click();
+  await expect(page.locator('#challenge-library')).toContainText('My challenges');
+  expect(await page.locator('#challenge-library .challenge-object').count()).toBeGreaterThanOrEqual(6);
+  await expect(page.locator('#challenge-library')).toContainText(/Agent Godoy|Generated fallback/);
+  await expect(page.locator('#challenge-board')).toContainText('Received from friends');
+  await expect(page.locator('#challenge-board')).toContainText('Sent to friends');
   await expect(page.locator('#challenge-board')).toContainText('Needs your response');
   await expect(page.locator('#challenge-board')).toContainText('Active');
   await expect(page.locator('#challenge-board')).toContainText('Completed');
@@ -42,12 +52,32 @@ test('post-login features are separated into a coherent persistent navigation', 
 
   await page.locator('[data-nav="you"]').click();
   await expect(page.locator('[data-view="you"] h1')).toHaveText('YOU');
+  await expect(page.locator('#profile-source')).toBeVisible();
+  await expect(page.locator('#profile-source')).toContainText('Strava data export');
   await expect(page.locator('#source-metrics')).toBeVisible();
   await expect(page.locator('#source-metrics')).toContainText('209');
   await expect(page.locator('#bars')).toBeVisible();
-  await expect(page.locator('#profile-summary')).toContainText('coverage');
+  await expect(page.locator('#profile-summary')).toContainText('Postgres-backed source');
+  await expect(page.locator('#profile-diagnostics')).toBeVisible();
+  await expect(page.locator('#profile-diagnostics')).toContainText('Your diagnostics');
+  await expect(page.locator('#state-label')).not.toHaveText('—');
+  await expect(page.locator('#profile-next')).toBeVisible();
+  await expect(page.locator('#godoy-content')).toContainText('Suggested interventions');
+  await expect(page.locator('#healf-zone-card')).toContainText('Try Healf Bloods');
+  await expect(page.locator('#healf-zone-card')).toContainText('Up to 37 biomarkers');
+  await expect(page.locator('#healf-zone-card img')).toHaveAttribute('alt', /Healf Zone at-home blood collection kit/);
+  expect(await page.locator('#godoy-content .candidate').count()).toBeGreaterThanOrEqual(3);
+  await page.locator('[data-godoy-question]').first().click();
+  await expect(page.locator('#godoy-content .chat-message.user')).toBeVisible();
+  await expect(page.locator('#godoy-content .chat-focused-reply')).toBeVisible();
+  await expect(page.locator('#past-runs')).toBeVisible();
+  await expect(page.locator('#past-runs')).toContainText('strava-export');
+  expect(await page.evaluate(() => {
+    const ids=['profile-source','profile-diagnostics','profile-next','profile-history'];
+    return ids.every((id,index) => index === 0 || Boolean(document.getElementById(ids[index-1]).compareDocumentPosition(document.getElementById(id)) & Node.DOCUMENT_POSITION_FOLLOWING));
+  })).toBe(true);
   await expect(page.locator('#profile-settings')).toContainText('Export brief');
-  await expect(page.locator('#profile-name')).toContainText('Alex Morgan');
+  await expect(page.locator('#profile-name')).toContainText('Javi');
   await expect(page.locator('#analyse')).toContainText('Generate next steps');
 
   await Promise.all([

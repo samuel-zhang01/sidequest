@@ -63,6 +63,7 @@
   let fallbackCanvas;
   let fallbackRequested = false;
   let playbackFallbackTimer;
+  let challengeTemplates = [];
 
   function switchMode(mode, {manual = true, announce = true} = {}) {
     if (!['me', 'watch'].includes(mode)) return;
@@ -632,11 +633,19 @@
     event.preventDefault(); if (!viewedStream) return;
     const button = event.submitter || event.currentTarget.querySelector('button'); button.disabled = true;
     try {
-      const result = await post(`/api/live/streams/${viewedStream.id}/challenges`, {amountMinor:Math.round(Number($('#live-challenge-amount').value) * 100), currency:'GBP', taskType:$('#live-challenge-type').value, message:$('#live-challenge-message').value});
+      const result = await post(`/api/live/streams/${viewedStream.id}/challenges`, {templateId:$('#live-challenge-template').value||null,amountMinor:Math.round(Number($('#live-challenge-amount').value) * 100), currency:'GBP', taskType:$('#live-challenge-type').value, message:$('#live-challenge-message').value});
       addChallenge(result.challenge);
       setStatus('#watch-status', 'Challenge delivered to the runner. No payment was charged.');
     } catch (error) { setStatus('#watch-status', error.message); }
     finally { button.disabled = false; }
+  }
+
+  async function loadChallengeTemplates() {
+    const result=await api('/api/challenge-templates');challengeTemplates=result.templates||[];
+    const select=$('#live-challenge-template'),requested=new URL(location.href).searchParams.get('template');
+    select.innerHTML='<option value="">Quick challenge</option>'+challengeTemplates.map(item=>`<option value="${escapeHtml(item.id)}">${escapeHtml(item.title)} · ${item.source_kind==='llm'?'Agent Godoy':item.source_kind==='generated-fallback'?'Generated fallback':'Starter'}</option>`).join('');
+    if(requested&&challengeTemplates.some(item=>item.id===requested))select.value=requested;
+    if(select.value)select.dispatchEvent(new Event('change'));
   }
 
   function routePoints(route) {
@@ -687,9 +696,11 @@
     $('#remote-video').insertAdjacentElement('afterend', remoteFallback);
     const challengeForm = $('#live-challenge-form');
     challengeForm.classList.add('dynamic-challenge-compose');
-    challengeForm.insertAdjacentHTML('afterbegin', `<select id="live-challenge-type" aria-label="Challenge type"><option value="pace-boost">Pace boost · next km</option><option value="hold-steady">Hold steady · next km</option><option value="finish-strong">Finish strong · 1 minute</option><option value="custom">Custom challenge</option></select><input id="live-challenge-message" maxlength="120" value="Push the next kilometre just above your recent average" aria-label="Challenge message">`);
+    challengeForm.insertAdjacentHTML('afterbegin', `<select id="live-challenge-template" aria-label="My challenge object"><option value="">Loading My challenges…</option></select><select id="live-challenge-type" aria-label="Quick challenge type"><option value="pace-boost">Pace boost · next km</option><option value="hold-steady">Hold steady · next km</option><option value="finish-strong">Finish strong · 1 minute</option><option value="custom">Custom challenge</option></select><input id="live-challenge-message" maxlength="120" value="Push the next kilometre just above your recent average" aria-label="Challenge message">`);
+    $('#live-challenge-template').onchange = event => {const template=challengeTemplates.find(item=>item.id===event.target.value);if(!template)return;$('#live-challenge-message').value=template.live_message;$('#live-challenge-amount').value=Math.max(1,Math.round(Number(template.suggested_pledge_minor||500)/100));};
     $('#live-challenge-type').onchange = event => {
       const messages = {'pace-boost':'Push the next kilometre just above your recent average','hold-steady':'Hold a comfortable, steady pace for the next kilometre','finish-strong':'Finish the next controlled minute feeling strong','custom':''};
+      $('#live-challenge-template').value='';
       $('#live-challenge-message').value = messages[event.target.value];
       if (event.target.value === 'custom') $('#live-challenge-message').focus();
     };
@@ -723,13 +734,14 @@
   }
 
   bindUi();
-  api('/api/auth/me').then(result => {
+  api('/api/auth/me').then(async result => {
     if (!result.user) { location.href = '/?next=/live'; return; }
     me = result.user;
     $('#user-name').textContent = me.displayName; $('#avatar').textContent = me.initials;
     $('#creator-avatar').textContent = me.avatarEmoji; $('#creator-avatar').style.background = me.accent;
     $('#nav-avatar').textContent = me.initials; $('#nav-user-name').textContent = me.displayName;
     const requestedMode = new URL(location.href).searchParams.get('mode');
+    await loadChallengeTemplates();
     if (requestedMode === 'watch') switchMode('watch', {manual:true, announce:false});
     else switchMode('me', {manual:requestedMode === 'me', announce:false});
     loadStreams({allowAutoJoin:requestedMode !== 'me'});

@@ -21,7 +21,7 @@ After entry, there are exactly four primary destinations, in this order:
 
 | Position | Destination | Icon idea | The question it answers |
 | --- | --- | --- | --- |
-| 1 | Home | House | What are my friends doing, and what needs my attention? |
+| 1 | Home | House | What are my friends doing? |
 | 2 | YOU | Person | What does my saved history say, and what should I try next? |
 | 3 | Live | Play button in a route | Who is running, and can I watch, respond, or start my own run? |
 | 4 | Challenge | Two-way challenge card | What have my friends and I committed to? |
@@ -76,15 +76,13 @@ not for completing every workflow.
 
 Top to bottom:
 
-1. A compact attention strip shows at most a few timely items: a challenge to
-   answer, a suggested intervention, a friend's live run, or a safe next step.
-2. A horizontally scrollable friend/live row uses persisted user profiles.
+1. A horizontally scrollable friend/live row uses persisted user profiles.
    A live friend is clearly marked; tapping opens their live detail. When no
    friends exist, the row shows an honest empty state.
-3. The main feed contains reusable activity cards. A card has the friend's
+2. The main feed contains reusable activity cards. A card has the friend's
    picture/avatar and name at the top, a privacy-safe live or completed route
    map as the main visual, useful run metadata, and a short action row.
-4. Relevant calls to action include **Watch live**, **Cheer**, **Challenge**,
+3. Relevant calls to action include **Watch live**, **Cheer**, **Challenge**,
    and **View result**. Each action opens the owning destination or detail;
    Home does not duplicate the full challenge or broadcast tools.
 
@@ -97,10 +95,19 @@ friend's public card.
 
 YOU is the private data layer. It opens with the user's evidence coverage and
 latest non-diagnostic assessment, then shows source-backed run history,
-completed outcomes, and LLM-generated next steps. A prominent **Generate next
-steps** action creates a fresh validated assessment and intervention candidates
-from the user's server-persisted evidence. A selected candidate can be sent to
-a friend from Challenge.
+completed outcomes, and LLM-generated next steps. Next steps use a chat-style
+interface: a short evidence-backed opening read, selectable example questions,
+and assistant messages containing the resulting interventions. A prominent
+**Generate next steps** action creates a fresh validated assessment and
+intervention candidates from the user's server-persisted evidence. A selected
+candidate can be sent to a friend from Challenge.
+
+An external product or service may appear as an optional evidence-gap
+intervention when its source and limits are explicit. It must explain why the
+saved running evidence cannot answer the relevant question, link to the source
+for current product details, state important eligibility limits, and never
+present a commercial test as a diagnosis, prescription, exercise clearance, or
+requirement. External options do not silently become friend challenges.
 
 Live GPS sessions, aggregate run outcomes, effort, and challenge responses are
 persisted in Postgres against the signed-in user and appear here after refresh.
@@ -170,6 +177,15 @@ A safety stop is responsible completion and must never be styled as failure.
 Pledges remain clearly labelled commitments unless real payment processing is
 implemented and verified.
 
+Agent Godoy outputs are persisted as reusable challenge templates owned by the
+user who generated them. Sending a template creates a recipient-specific
+assignment; using it while watching Live creates a live challenge instance.
+Challenge shows the owner's available templates under **My challenges**, plus
+separate received and sent instances. The same assignment or live instance is
+visible to both participants from their own Challenge tab, with recipient-only
+accept/decline controls. Regeneration may archive older generated templates,
+but must not erase instances already sent to friends.
+
 ## Data-driven architecture
 
 The interface is assembled from domain objects returned by same-origin
@@ -187,6 +203,9 @@ User
 ├── FeedItems ──> actor + run/challenge/live-session reference
 ├── Assessments ──> evidence signals + questions + interventions
 └── Challenges
+    ├── reusable template ──> generated assessment or starter source
+    ├── assignment ──> sender + recipient + response
+    ├── live instance ──> stream + challenger + runner + response
     ├── owner and participants
     ├── intervention and safety rule
     ├── pledges

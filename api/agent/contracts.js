@@ -52,7 +52,7 @@ const AgentGodoyOutputSchema = z.object({
     safetyTriage: z.enum(['no-reported-red-flags', 'needs-clarification', 'stop-and-seek-care']),
   }).strict(),
   questions: z.array(QuestionSchema).min(2).max(8),
-  interventions: z.array(InterventionSchema).min(1).max(4),
+  interventions: z.array(InterventionSchema).min(3).max(4),
   disclaimer: z.string().min(1).max(360),
 }).strict();
 

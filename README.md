@@ -19,7 +19,7 @@ Observe → Estimate → Ask → Intervene → Rally → Reassess ↺
 - Live browser GPS sessions send samples through same-origin API routes. The
   server validates coordinates and plausible speed, derives distance/time/pace
   and stores the completed session as the same neutral run-observation shape.
-- Leaving the welcome field blank opens the stable owner profile associated
+- Leaving the welcome field blank opens Javi's stable owner profile associated
   with the private Strava export. Entering a display name creates or resumes a
   separate friend profile. A server session keeps concurrent phones and their
   data writes separate.
@@ -28,9 +28,9 @@ Observe → Estimate → Ask → Intervene → Rally → Reassess ↺
   uses Home, YOU, Live, and Challenge, in that order. It becomes a labelled
   bottom bar on phones, while preserving the same destinations and active
   states.
-- Home is a server-driven overview: timely attention cards, a horizontally
-  scrolling friend/live row, and up to three recent activity cards rendered
-  from persisted Strava or Live observations returned by the private API.
+- Home is a server-driven overview: a horizontally scrolling friend/live row
+  and up to three recent activity cards rendered from persisted Strava or Live
+  observations returned by the private API.
 - YOU is the private data layer: source-backed diagnostics, saved Live/GPS run
   history, evidence coverage, and LLM-generated next steps live together with
   a prominent generation action. Live now has one prominent **Me / Watch others** control. Me opens the
@@ -77,6 +77,16 @@ Observe → Estimate → Ask → Intervene → Rally → Reassess ↺
   signals, possible explanations, limitations, questions and up to four
   challenge-ready interventions. Zod provides the Pydantic-style boundary for
   this Node stack.
+- YOU presents that assessment as a chat: evidence-backed opening copy,
+  selectable sample questions, and intervention cards. An explicitly external
+  Healf Bloods option explains that running history contains no current blood
+  biomarkers, links to Healf's source page, states eligibility limits, and is
+  kept separate from challenge-ready model output.
+- Each generated intervention is materialized as a reusable, owner-scoped
+  challenge template in Postgres. Challenge separates **My challenges** from
+  received and sent assignments; Live can instantiate the same template
+  against the friend currently broadcasting. Both participants see the saved
+  instance and only the recipient can accept or decline it.
 - People can add private goal, recovery, symptom, schedule or medical context
   and export their complete Agent Godoy brief as JSON. Raw GPS coordinates are
   excluded from the agent input and export.
@@ -137,6 +147,9 @@ mount. `.env`, `.secrets/` and raw activity files are not exposed to browsers.
 | `GET /api/feedback-loop` | Return the complete persisted loop and source metadata. |
 | `POST /api/auth/join` | Open the Strava-backed owner profile when blank, or enter a separate friend profile by display name. |
 | `POST /api/agent-godoy/analyse` | Persist a validated assessment, questions and possible interventions. |
+| `GET /api/challenge-templates` | Return the signed-in user's reusable generated and starter challenge objects. |
+| `POST /api/challenge-templates/:id/assign` | Instantiate an owned challenge object for a selected friend. |
+| `PATCH /api/challenge-assignments/:id/response` | Let the recipient accept or decline an assigned challenge. |
 | `POST /api/context` | Add optional private person context for future analysis. |
 | `GET /api/agent-godoy/export` | Download the signed-in runner's structured brief as JSON. |
 | `POST /api/agent-godoy/challenges/:candidate/adopt` | Turn one suggested intervention into the active editable challenge. |

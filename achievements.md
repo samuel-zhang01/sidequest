@@ -28,8 +28,8 @@ never speed, suffering, or pushing through warning symptoms.
 - The Node API and Postgres stay private on the Compose network.
 - The server imports aggregate runs from
   `db/data/strava/activities.csv`; the current export contains 209 usable runs.
-- `STRAVA_OWNER_USER_ID` binds that private export to one stable owner. Blank
-  welcome entry opens that owner profile, while named entries remain isolated
+- `STRAVA_OWNER_USER_ID` and `STRAVA_OWNER_HANDLE` bind that private export to
+  Javi's stable owner profile. Blank welcome entry opens that owner, while named entries remain isolated
   friend profiles. The owner is explicitly migrated out of the legacy
   illustrative-user flag on startup.
 - Automatic fallback observations, fabricated social runs, and automatic
@@ -163,6 +163,55 @@ Delivered capabilities:
 - Only share the public challenge and stop/settlement rules with friends or
   brands; keep private evidence and context private.
 
+## Real Strava owner analytics and honest content — verified 2026-08-29
+
+- The private Strava export is bound to Javi through `STRAVA_OWNER_USER_ID` and
+  `STRAVA_OWNER_HANDLE`, then synchronized idempotently into that user's observations. The owner has 209 runs,
+  including 188 with heart rate and 10 with perceived effort.
+- Blank welcome entry opens the Strava-backed owner profile; entering a name
+  creates or resumes an isolated friend profile.
+- Startup no longer creates fallback runs, fabricated social activity,
+  automatic interventions, or automatic friend messages. Legacy flagged run
+  and notification records are removed during schema maintenance.
+- Home shows up to three recent persisted Strava or Live observations. YOU
+  presents Javi's owner-scoped data in the explicit order Strava evidence →
+  diagnostics → LLM next steps → past runs → settings. The explicit generation
+  action remains beside the next-steps section.
+- Source synchronization persists an idempotent `source-sync` diagnostic
+  snapshot in Postgres for Javi, keyed by run count and latest activity time.
+  The UI never depends on browser-local analytics or activity storage.
+- Exercised the owner generation path against the configured Google provider.
+  Postgres now holds a validated `gemini-structured-output` assessment for
+  Javi from `gemini-3.6-flash`, with two follow-up questions and one suggested
+  intervention rendered under YOU → Next steps.
+- The public-facing interface and handoff copy no longer describe synthetic
+  activity, payments, or accounts as product data. Pledges remain explicit
+  commitments and no payment is charged.
+- Verified locally with Compose config, healthy web/API/Postgres services,
+  `/health`, `/api/status`, an authenticated 209-run owner response,
+  `test:navigation`, `live-modes.spec.js`, and `live-phone.spec.js`.
+
+## Reusable social challenge objects — verified 2026-08-29
+
+- Agent Godoy now returns three or four interventions and materializes each as
+  an owner-scoped `challenge_templates` row. A successful Gemini 3.6 Flash run
+  produced three validated LLM challenge objects for Javi; three replaceable
+  starter objects keep the interaction testable while generation evolves.
+- Regeneration archives older generated templates but preserves every existing
+  assignment and live instance that references them. Provenance distinguishes
+  model output, validated fallback output, and starter objects.
+- Challenge shows **My challenges**, **Received from friends**, and **Sent to
+  friends**. Selecting an object and choosing a friend creates a persisted
+  `challenge_assignments` instance visible to both users; only the recipient
+  can accept or decline it.
+- Live loads the signed-in viewer's challenge catalog. Sending a selected
+  object persists its template ID in `live_run_challenges`, relays it to the
+  runner, and exposes the resulting sent/received instance in both users'
+  Challenge projections.
+- Added a cross-user challenge-object browser regression. Navigation,
+  assignment/acceptance, template-backed Live, camera compatibility, and the
+  two-phone live flow all pass against the Compose/Postgres stack.
+
 ## Validation record — 2026-08-29
 
 - `node --check` passed for the API and both Agent Godoy modules.
@@ -242,6 +291,10 @@ Delivered capabilities:
   validation, API syntax, local health/status checks, and the navigation
   browser regression. Mobile visual inspection confirmed the evidence hero,
   quick links, loop stepper, and standalone safety card no longer render.
+- Removed the Home attention module, including its synthetic “safe next step”
+  fallback. Home now opens directly on the persisted running-circle and past-run
+  sections. Compose validation, local health/status, the navigation regression,
+  and a public HTTPS check passed; the removed copy is absent from the live HTML.
 
 ## Model-provider verification — 2026-08-29
 
@@ -294,6 +347,30 @@ Delivered capabilities:
 - Local and public health/status checks passed; all three Compose services are
   healthy and only port 6969 is published. Public HTTPS serves the updated Live
   page and a cache-busted JavaScript asset through Cloudflare.
+
+## Agent Godoy chat and Healf evidence-gap option — verified 2026-08-29
+
+- Replaced YOU's four-panel next-steps report with a responsive chat interface.
+  The latest persisted assessment opens the conversation, its existing
+  generated questions become selectable sample prompts, and choosing one adds
+  a user message plus an evidence-bounded assistant reply without changing the
+  saved assessment.
+- The same server-projected flow now includes **Try Healf Bloods** as an
+  explicitly external, optional evidence-gap intervention. Its rationale is
+  limited to the fact that saved run history has no current blood biomarkers;
+  it does not imply a diagnosis, prescription, exercise clearance, or universal
+  need for testing.
+- The product card uses Healf's official kit visual and source page, accurately
+  describes at-home collection, up to 37 biomarkers, typical results within 72
+  hours after the sample reaches the lab, and the stated UK/adult/pregnancy
+  eligibility boundary. External products remain separate from reusable friend
+  challenge objects.
+- API/server syntax, the inline browser script, Compose configuration, and
+  `git diff --check` passed. The navigation regression passed with API, Healf
+  product-card, accessibility-text, and prompt-interaction assertions. Desktop
+  and 390 px mobile chat/product layouts were visually inspected in Chromium;
+  local web, API, and Postgres services remained healthy on the single published
+  port.
 
 ## Infrastructure invariants
 

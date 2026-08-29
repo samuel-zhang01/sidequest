@@ -13,6 +13,8 @@ test.use({
 test('a new viewer automatically joins a real browser camera stream', async ({ browser }) => {
   test.setTimeout(60000);
   const suffix = Date.now();
+  const broadcasterName = `B${suffix} Runner`;
+  const viewerName = `V${suffix} Friend`;
   const appUrl = process.env.APP_URL || 'http://127.0.0.1:6969';
   const contextOptions = {
     permissions: ['camera', 'microphone', 'geolocation'],
@@ -35,7 +37,7 @@ test('a new viewer automatically joins a real browser camera stream', async ({ b
   }
 
   await broadcaster.goto(`${appUrl}/`);
-  await broadcaster.locator('#join-identity').fill(`Browser Broadcaster ${suffix}`);
+  await broadcaster.locator('#join-identity').fill(broadcasterName);
   await Promise.all([
     broadcaster.waitForURL('**/#home'),
     broadcaster.locator('#join-form button').click(),
@@ -50,18 +52,22 @@ test('a new viewer automatically joins a real browser camera stream', async ({ b
       return nativeGetUserMedia({ ...constraints, audio: false });
     };
   });
+  await broadcaster.locator('[data-mode="me"]').click();
   await broadcaster.locator('#start-button').click();
   await expect(broadcaster.locator('#broadcast-status')).toContainText('You are live', { timeout: 15000 });
   await expect(broadcaster.locator('#broadcast-status')).toContainText('without microphone audio');
   await expect(broadcaster.locator('#broadcast-live')).toBeVisible();
 
   await viewer.goto(`${appUrl}/`);
-  await viewer.locator('#join-identity').fill(`Browser Viewer ${suffix}`);
+  await viewer.locator('#join-identity').fill(viewerName);
   await Promise.all([
     viewer.waitForURL('**/#home'),
     viewer.locator('#join-form button').click(),
   ]);
   await viewer.goto(`${appUrl}/live`);
+  const expectedStream = viewer.locator('[data-stream]').filter({ hasText: broadcasterName });
+  await expect(expectedStream).toBeVisible({ timeout: 15000 });
+  await expectedStream.click();
   await expect(viewer.locator('#watch')).toBeVisible({ timeout: 15000 });
   await expect(viewer.locator('#watch-status')).toContainText('Connected', { timeout: 15000 });
   await expect(viewer.locator('#remote-empty')).toBeHidden({ timeout: 15000 });
@@ -73,13 +79,13 @@ test('a new viewer automatically joins a real browser camera stream', async ({ b
   ), { timeout: 10000 }).toBeLessThan(4);
 
   await viewer.locator('[data-cheer="🎉"]').click();
-  await expect(viewer.locator('#cheer-feed')).toContainText('Browser Viewer');
+  await expect(viewer.locator('#cheer-feed')).toContainText(viewerName);
   await expect(broadcaster.locator('#broadcast-viewers')).toContainText('1 viewer');
 
   await viewer.locator('#live-challenge-amount').fill('5');
   await viewer.locator('#live-challenge-form button').click();
   await expect(viewer.locator('#watch-status')).toContainText('Challenge delivered');
-  await expect(broadcaster.locator('#broadcast-challenges')).toContainText('Browser Viewer');
+  await expect(broadcaster.locator('#broadcast-challenges')).toContainText(viewerName);
   await expect(broadcaster.locator('#broadcast-challenges')).toContainText('£5.00');
   await expect(broadcaster.locator('#broadcast-challenges')).toContainText('Mind');
   await expect(broadcaster.locator('#broadcast-challenge-count')).toContainText('1 live');

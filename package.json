@@ -1,5 +1,5 @@
 {
-  "name": "sidequest-demo",
+  "name": "sidequest-loop",
   "version": "0.1.0",
   "private": true,
   "description": "Single-port SideQuest peer-powered running feedback loop",
@@ -11,6 +11,7 @@
     "logs": "docker compose logs -f",
     "status": "docker compose ps",
     "test:navigation": "playwright test tests/navigation.spec.js --workers=1",
+    "test:challenge": "playwright test tests/challenge-objects.spec.js --workers=1",
     "test:live": "playwright test tests/live-phone.spec.js tests/live-modes.spec.js --workers=1"
   },
   "devDependencies": {

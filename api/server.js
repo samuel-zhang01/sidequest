@@ -209,6 +209,30 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     CREATE INDEX IF NOT EXISTS agent_assessments_user_time_idx ON agent_assessments(user_id,created_at DESC);
+    CREATE TABLE IF NOT EXISTS challenge_templates (
+      id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      assessment_id TEXT REFERENCES agent_assessments(id) ON DELETE SET NULL,
+      source_kind TEXT NOT NULL, source_ref TEXT NOT NULL,
+      title TEXT NOT NULL, description TEXT NOT NULL, instructions TEXT NOT NULL,
+      duration_days INTEGER NOT NULL, target_distance_meters INTEGER NOT NULL DEFAULT 0,
+      success_criteria JSONB NOT NULL, measures_to_collect JSONB NOT NULL,
+      safety_rule TEXT NOT NULL, live_message TEXT NOT NULL,
+      suggested_pledge_minor INTEGER NOT NULL DEFAULT 0, currency VARCHAR(3) NOT NULL DEFAULT 'GBP',
+      funding_cap_minor INTEGER NOT NULL DEFAULT 0, settlement_rule TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'available', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(owner_user_id,source_kind,source_ref)
+    );
+    CREATE INDEX IF NOT EXISTS challenge_templates_owner_time_idx ON challenge_templates(owner_user_id,created_at DESC);
+    CREATE TABLE IF NOT EXISTS challenge_assignments (
+      id TEXT PRIMARY KEY, template_id TEXT NOT NULL REFERENCES challenge_templates(id),
+      sender_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      recipient_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'proposed', pledge_amount_minor INTEGER NOT NULL DEFAULT 0,
+      currency VARCHAR(3) NOT NULL DEFAULT 'GBP', due_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), responded_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS challenge_assignments_participants_idx ON challenge_assignments(sender_user_id,recipient_user_id,created_at DESC);
+    ALTER TABLE live_run_challenges ADD COLUMN IF NOT EXISTS template_id TEXT;
     CREATE TABLE IF NOT EXISTS challenge_pledges (
       id TEXT PRIMARY KEY, intervention_id TEXT NOT NULL REFERENCES interventions(id) ON DELETE CASCADE,
       contributor_name TEXT NOT NULL, contributor_kind TEXT NOT NULL,
@@ -244,6 +268,8 @@ async function ensureSchema() {
       ALTER TABLE challenge_pledges DROP COLUMN IF EXISTS demo;
     END $$`);
   await pool.query('UPDATE users SET is_legacy_placeholder=FALSE WHERE id=$1',[stravaOwnerUserId]);
+  await pool.query(`UPDATE challenge_templates t SET source_kind='generated-fallback',updated_at=NOW()
+    FROM agent_assessments a WHERE t.assessment_id=a.id AND a.engine_mode='deterministic-fallback' AND t.source_kind='llm'`);
 }
 
 async function importStrava() {
@@ -349,7 +375,41 @@ async function runAndPersistGodoy(userId,{allowModel=true}={}) {
     VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,[id,userId,agent.result,agent.mode,agent.provider,agent.model]);
   await pool.query(`INSERT INTO engine_runs(user_id,purpose,mode,input_context,result) VALUES($1,'agent-godoy',$2,$3,$4)`,
     [userId,agent.mode,{observationCount:context.summary.run_count,contextEntryCount:additionalContext.rows.length,rawCoordinatesShared:false},agent.result]);
+  await persistAssessmentChallengeTemplates(userId,stored.rows[0]);
   return stored.rows[0];
+}
+const starterChallengeTemplates=[
+  {ref:'conversational-kilometre',title:'Conversational kilometre',description:'Hold one comfortable kilometre and finish able to speak in full sentences.',instructions:'Use the next kilometre as an easy observation. Do not chase pace; record effort afterward.',durationDays:1,targetDistanceMeters:1000,criteria:['Complete only if the effort stays conversational','Record effort after the kilometre'],measures:['moving pace','perceived effort','warning symptoms'],liveMessage:'Hold the next kilometre at a comfortable, conversational effort',pledge:500},
+  {ref:'steady-five-minutes',title:'Five steady minutes',description:'Keep the next five minutes smooth and controlled without accelerating for the pledge.',instructions:'Choose a comfortable rhythm for five minutes, then report whether it stayed controlled.',durationDays:1,targetDistanceMeters:0,criteria:['Keep the effort controlled for five minutes','Record whether the effort changed'],measures:['moving time','perceived effort','warning symptoms'],liveMessage:'Keep the next five minutes smooth, steady, and comfortable',pledge:500},
+  {ref:'honest-finish-check',title:'Honest finish check-in',description:'Finish the current run without adding intensity and record an honest effort score.',instructions:'Maintain the planned easy effort through the finish. The evidence is the check-in, not speed.',durationDays:1,targetDistanceMeters:0,criteria:['Do not add intensity for the challenge','Record effort and symptoms at the finish'],measures:['perceived effort','warning symptoms','moving time'],liveMessage:'Finish at your planned effort and log an honest effort score',pledge:750}
+];
+const standardSafetyRule='Only attempt this if it feels comfortable. Stop for pain, chest discomfort, dizziness, faintness or unusual breathlessness; a safety stop counts as responsible completion.';
+async function ensureStarterChallengeTemplates(userId) {
+  for(const item of starterChallengeTemplates)await pool.query(`INSERT INTO challenge_templates(
+      id,owner_user_id,source_kind,source_ref,title,description,instructions,duration_days,target_distance_meters,
+      success_criteria,measures_to_collect,safety_rule,live_message,suggested_pledge_minor,currency,funding_cap_minor,settlement_rule)
+    VALUES($1,$2,'starter',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'GBP',10000,$14)
+    ON CONFLICT(owner_user_id,source_kind,source_ref) DO NOTHING`,
+    [`challenge-template-${userId}-${item.ref}`,userId,item.ref,item.title,item.description,item.instructions,item.durationDays,item.targetDistanceMeters,
+      JSON.stringify(item.criteria),JSON.stringify(item.measures),standardSafetyRule,item.liveMessage,item.pledge,'A safety stop or an honest recorded check-in counts as responsible completion; no speed target controls the pledge.']);
+}
+async function persistAssessmentChallengeTemplates(userId,assessment) {
+  const sourceKind=assessment.engine_mode==='deterministic-fallback'?'generated-fallback':'llm';
+  await pool.query("UPDATE challenge_templates SET status='archived',updated_at=NOW() WHERE owner_user_id=$1 AND source_kind IN('llm','generated-fallback') AND status='available'",[userId]);
+  for(const candidate of assessment.output.interventions){const challenge=candidate.challenge,sourceRef=`${assessment.id}:${candidate.id}`;
+    await pool.query(`INSERT INTO challenge_templates(id,owner_user_id,assessment_id,source_kind,source_ref,title,description,instructions,duration_days,target_distance_meters,
+        success_criteria,measures_to_collect,safety_rule,live_message,suggested_pledge_minor,currency,funding_cap_minor,settlement_rule)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,0,$10,$11,$12,$13,$14,$15,$16,$17)
+      ON CONFLICT(owner_user_id,source_kind,source_ref) DO UPDATE SET status='available',updated_at=NOW()`,
+      [`challenge-template-${assessment.id}-${candidate.id}`,userId,assessment.id,sourceKind,sourceRef,challenge.title,challenge.description,candidate.instructions,candidate.durationDays,
+        JSON.stringify(candidate.successCriteria),JSON.stringify(candidate.measuresToCollect),candidate.safetyStop,challenge.title,challenge.suggestedStakeMinor,challenge.currency,challenge.fundingCapMinor,challenge.settlementRule]);}
+}
+async function ensureOwnerChallengeCatalog() {
+  await ensureStarterChallengeTemplates(stravaOwnerUserId);
+  const assessment=(await pool.query('SELECT * FROM agent_assessments WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1',[stravaOwnerUserId])).rows[0];
+  if(!assessment)return;
+  const existing=await pool.query("SELECT id FROM challenge_templates WHERE owner_user_id=$1 AND assessment_id=$2 AND source_kind IN('llm','generated-fallback') LIMIT 1",[stravaOwnerUserId,assessment.id]);
+  if(!existing.rows[0])await persistAssessmentChallengeTemplates(stravaOwnerUserId,assessment);
 }
 async function generateIntervention(userId,force=false) {
   if(!force){const active=await pool.query("SELECT * FROM interventions WHERE user_id=$1 AND status IN('proposed','accepted') ORDER BY created_at DESC LIMIT 1",[userId]);if(active.rows[0])return active.rows[0];}
@@ -370,7 +430,7 @@ async function generateIntervention(userId,force=false) {
     [userId,{snapshotId:snapshot.rows[0].id,typicalDistanceMeters:typical},item]);
   return result.rows[0];
 }
-async function socialHome(userId,intervention) {
+async function socialHome(userId) {
   const [currentUserResult,friendResult,streamResult,runResult]=await Promise.all([
     pool.query('SELECT id,display_name,handle,initials,accent,avatar_emoji FROM users WHERE id=$1',[userId]),
     pool.query('SELECT id,display_name,handle,initials,accent,avatar_emoji FROM users WHERE id<>$1 AND is_legacy_placeholder=FALSE ORDER BY display_name LIMIT 8',[userId]),
@@ -394,16 +454,30 @@ async function socialHome(userId,intervention) {
     stats:{distanceMeters:Number(run.distance_meters),movingSeconds:Number(run.moving_seconds),paceSecondsPerKm:Math.round(Number(run.moving_seconds)/(Number(run.distance_meters)/1000)),averageHeartRate:run.average_heart_rate,perceivedExertion:run.perceived_exertion},
     primaryAction:{label:'View in YOU',href:'#you'}
   }));
-  const attention=[];
-  const activeLive=streams.find(stream=>stream.status==='live'&&stream.broadcaster_user_id!==userId);
-  if(activeLive)attention.push({id:`attention-live-${activeLive.id}`,kind:'live',eyebrow:'Friend live',title:`${activeLive.display_name} is running now`,actionLabel:'Watch',href:'/live'});
-  if(intervention&&intervention.status==='proposed')attention.push({id:`attention-challenge-${intervention.id}`,kind:'challenge',eyebrow:'Needs your response',title:intervention.title,actionLabel:'Review',href:'#challenges'});
-  else if(intervention&&intervention.status==='completed')attention.push({id:`attention-result-${intervention.id}`,kind:'result',eyebrow:'Close the loop',title:'Your result is ready to reassess',actionLabel:'Reassess',href:'#challenges'});
-  if(attention.length<3)attention.push({id:'attention-next-run',kind:'run',eyebrow:'Safe next step',title:'Record a private GPS observation',actionLabel:'Open Live + Run',href:'/live'});
-  return {people,feedItems,attention:attention.slice(0,3),disclosure:'Activity shown here comes from persisted Strava imports and Live runs.'};
+  return {people,feedItems,disclosure:'Activity shown here comes from persisted Strava imports and Live runs.'};
 }
 
-async function getLoop(userId){const context=await observationContext(userId);const [user,snapshot,interventionResult,friends,assessment,contextEntries]=await Promise.all([
+function externalEvidenceInterventions(summary,snapshot) {
+  const runCount=Number(summary.run_count||0);
+  return [{
+    id:'healf-zone-bloods',
+    kind:'external-health-service',
+    title:'Try Healf Bloods',
+    eyebrow:'Optional evidence gap',
+    summary:'Add a broader biological snapshot when running data alone cannot explain how you feel.',
+    rationale:`SideQuest can see ${runCount} saved run${runCount===1?'':'s'}, but it has no current blood biomarkers. If you want more context beyond pace, distance and heart rate, Healf Zone offers an at-home test that may help you discuss areas such as iron, vitamin D, B12, thyroid and recovery markers with an appropriate professional.`,
+    facts:['At-home collection','Up to 37 biomarkers','Results typically within 72 hours of the sample reaching the lab'],
+    sourceLabel:'Healf Zone',
+    sourceUrl:'https://healf.com/zone',
+    imageUrl:'https://healf.com/_next/static/media/zone-pricing-media-2.bc69ad53.jpg',
+    imageAlt:'An open Healf Zone at-home blood collection kit with colour-coded compartments',
+    eligibility:'Available in the UK. Healf says its test is for adults aged 18+ and is not suitable during pregnancy.',
+    boundary:'This is an optional external service, not a diagnosis, prescription or requirement to exercise. Seek appropriate medical advice for symptoms or help interpreting results.',
+    evidenceGap:(snapshot?.data_gaps||[])[0]||'Current biomarkers are not part of the saved running evidence.'
+  }];
+}
+
+async function getLoop(userId){await ensureStarterChallengeTemplates(userId);const context=await observationContext(userId);const [user,snapshot,interventionResult,friends,assessment,contextEntries]=await Promise.all([
   pool.query('SELECT id,display_name,handle,initials,accent,avatar_emoji FROM users WHERE id=$1',[userId]),
   pool.query('SELECT * FROM health_snapshots WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1',[userId]),
   pool.query('SELECT * FROM interventions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1',[userId]),
@@ -417,19 +491,37 @@ async function getLoop(userId){const context=await observationContext(userId);co
     pool.query("SELECT * FROM health_snapshots WHERE trigger_type='post-intervention' AND trigger_ref=$1 ORDER BY created_at DESC LIMIT 1",[intervention.id]),
     pool.query('SELECT * FROM challenge_pledges WHERE intervention_id=$1 ORDER BY created_at DESC',[intervention.id])]);
     notifications=parts[0].rows;result=parts[1].rows[0]||null;postSnapshot=parts[2].rows[0]||null;pledges=parts[3].rows;}
-  const invitationResult=await pool.query(`SELECT i.id,i.title,i.challenge_description,i.instructions,i.safety_stop,i.status,i.due_at,
+  const [invitationResult,templateResult,assignmentResult,liveChallengeResult]=await Promise.all([pool.query(`SELECT i.id,i.title,i.challenge_description,i.instructions,i.safety_stop,i.status,i.due_at,
       i.funding_target_minor,i.currency,i.created_at,i.user_id AS recipient_user_id,i.sender_user_id,
       recipient.display_name AS recipient_name,recipient.handle AS recipient_handle,recipient.avatar_emoji AS recipient_avatar,recipient.accent AS recipient_accent,
       sender.display_name AS sender_name,sender.handle AS sender_handle,sender.avatar_emoji AS sender_avatar,sender.accent AS sender_accent
     FROM interventions i JOIN users recipient ON recipient.id=i.user_id LEFT JOIN users sender ON sender.id=i.sender_user_id
-    WHERE i.user_id=$1 OR i.sender_user_id=$1 ORDER BY i.created_at DESC LIMIT 40`,[userId]);
+    WHERE i.user_id=$1 OR i.sender_user_id=$1 ORDER BY i.created_at DESC LIMIT 40`,[userId]),
+    pool.query(`SELECT * FROM challenge_templates WHERE owner_user_id=$1 AND status='available'
+      ORDER BY (source_kind IN('llm','generated-fallback')) DESC,created_at DESC LIMIT 12`,[userId]),
+    pool.query(`SELECT a.*,t.title,t.description,t.live_message,t.safety_rule,t.source_kind,
+      sender.display_name AS sender_name,sender.avatar_emoji AS sender_avatar,sender.accent AS sender_accent,
+      recipient.display_name AS recipient_name,recipient.avatar_emoji AS recipient_avatar,recipient.accent AS recipient_accent
+      FROM challenge_assignments a JOIN challenge_templates t ON t.id=a.template_id
+      JOIN users sender ON sender.id=a.sender_user_id JOIN users recipient ON recipient.id=a.recipient_user_id
+      WHERE a.sender_user_id=$1 OR a.recipient_user_id=$1 ORDER BY a.created_at DESC LIMIT 40`,[userId]),
+    pool.query(`SELECT c.*,t.title,t.description,t.source_kind,s.title AS stream_title,
+      challenger.display_name AS challenger_name,challenger.avatar_emoji AS challenger_avatar,challenger.accent AS challenger_accent,
+      runner.display_name AS runner_name,runner.avatar_emoji AS runner_avatar,runner.accent AS runner_accent
+      FROM live_run_challenges c JOIN live_streams s ON s.id=c.stream_id
+      LEFT JOIN challenge_templates t ON t.id=c.template_id
+      JOIN users challenger ON challenger.id=c.challenger_user_id JOIN users runner ON runner.id=c.runner_user_id
+      WHERE c.challenger_user_id=$1 OR c.runner_user_id=$1 ORDER BY c.created_at DESC LIMIT 40`,[userId])]);
   const challengeInvitations=invitationResult.rows.map(row=>({...row,direction:row.sender_user_id===userId?'sent':row.sender_user_id?'received':'personal'}));
-  const summary=context.summary,sourceLabel=Number(summary.strava_runs)>0?'Strava data export':Number(summary.gps_runs)>0?'Live GPS':'No connected run data',social=await socialHome(userId,intervention);
+  const challengeAssignments=assignmentResult.rows.map(row=>({...row,direction:row.sender_user_id===userId?'sent':'received'}));
+  const liveChallenges=liveChallengeResult.rows.map(row=>({...row,direction:row.challenger_user_id===userId?'sent':'received'}));
+  const summary=context.summary,sourceLabel=Number(summary.strava_runs)>0?'Strava data export':Number(summary.gps_runs)>0?'Live GPS':'No connected run data',social=await socialHome(userId);
   return {ok:true,user:user.rows[0],source:{label:sourceLabel,adapter:Number(summary.strava_runs)>0?'strava-export-v1':'neutral-observation-v1',runCount:summary.run_count,
     firstRunAt:summary.first_run_at,latestRunAt:summary.latest_run_at,heartRateRuns:summary.heart_rate_runs,rpeRuns:summary.rpe_runs,gpsRuns:summary.gps_runs,
     freshnessDays:summary.latest_run_at?Math.floor((Date.now()-new Date(summary.latest_run_at))/86400000):null,grain:'One aggregate record per run; raw export files remain server-side'},
     observations:context.observations,snapshot:snapshot.rows[0]||null,agentAssessment:assessment.rows[0]||null,contextEntries:contextEntries.rows,
-    intervention,notifications,pledges,result,postSnapshot,friends:friends.rows,challengeInvitations,social,
+    intervention,notifications,pledges,result,postSnapshot,friends:friends.rows,challengeInvitations,
+    challengeTemplates:templateResult.rows,challengeAssignments,liveChallenges,social,externalEvidenceInterventions:externalEvidenceInterventions(summary,snapshot.rows[0]),
     loop:[{key:'observe',label:'Observe',complete:Number(summary.run_count)>0},{key:'estimate',label:'Estimate',complete:Boolean(snapshot.rows[0])},{key:'ask',label:'Ask',complete:Boolean(intervention)},
       {key:'intervene',label:'Intervene',complete:Boolean(intervention&&intervention.status!=='proposed')},{key:'rally',label:'Rally',complete:notifications.length>0},{key:'reassess',label:'Reassess',complete:Boolean(postSnapshot)}],
     engine:{mode:assessment.rows[0]?.engine_mode||'deterministic-fallback',provider:assessment.rows[0]?.provider||null,model:assessment.rows[0]?.model||null,contract:'neutral observations + user context → validated assessment/questions/interventions'},disclaimer:'Running signals are not a medical diagnosis and do not establish fitness to exercise.'};}
@@ -502,8 +594,8 @@ async function liveStreamDetails(streamId) {
       JOIN users u ON u.id=s.broadcaster_user_id WHERE s.id=$1`,[streamId]),
     pool.query(`SELECT c.id,c.emoji,c.created_at,u.display_name,u.handle,u.avatar_emoji FROM live_stream_cheers c
       JOIN users u ON u.id=c.sender_user_id WHERE c.stream_id=$1 ORDER BY c.created_at DESC LIMIT 30`,[streamId]),
-    pool.query(`SELECT c.*,u.display_name AS challenger_name,u.avatar_emoji AS challenger_avatar FROM live_run_challenges c
-      JOIN users u ON u.id=c.challenger_user_id WHERE c.stream_id=$1 ORDER BY c.created_at DESC LIMIT 30`,[streamId]),
+    pool.query(`SELECT c.*,t.title AS template_title,u.display_name AS challenger_name,u.avatar_emoji AS challenger_avatar FROM live_run_challenges c
+      LEFT JOIN challenge_templates t ON t.id=c.template_id JOIN users u ON u.id=c.challenger_user_id WHERE c.stream_id=$1 ORDER BY c.created_at DESC LIMIT 30`,[streamId]),
     pool.query(`SELECT ROUND(AVG(moving_seconds/(distance_meters/1000.0)))::int AS average_pace_seconds
       FROM (SELECT distance_meters,moving_seconds FROM run_observations
         WHERE user_id=(SELECT broadcaster_user_id FROM live_streams WHERE id=$1) AND distance_meters>=1000
@@ -516,7 +608,7 @@ async function liveStreamDetails(streamId) {
     charityName:stream.charity_name,averagePaceSeconds:Number(paceResult.rows[0]?.average_pace_seconds)||360,
     productUrl:stream.product_url,viewerCount:channel?.viewers.size||0,peakViewers:stream.peak_viewers,startedAt:stream.started_at,endedAt:stream.ended_at,
     broadcaster:{id:stream.broadcaster_user_id,displayName:stream.display_name,handle:stream.handle,avatarEmoji:stream.avatar_emoji,accent:stream.accent},cheers:cheerResult.rows,
-    challenges:challengeResult.rows.map(row=>({id:row.id,taskType:row.task_type,message:row.challenge_message,averagePaceSeconds:row.average_pace_seconds,targetPaceSeconds:row.target_pace_seconds,
+    challenges:challengeResult.rows.map(row=>({id:row.id,templateId:row.template_id,templateTitle:row.template_title,taskType:row.task_type,message:row.challenge_message,averagePaceSeconds:row.average_pace_seconds,targetPaceSeconds:row.target_pace_seconds,
       pledgeAmountMinor:row.pledge_amount_minor,currency:row.currency,charityName:row.charity_name,status:row.status,safetyRule:row.safety_rule,createdAt:row.created_at,
       challenger:{displayName:row.challenger_name,avatarEmoji:row.challenger_avatar}}))};
 }
@@ -550,6 +642,17 @@ async function handler(request,response){const url=new URL(request.url,'http://a
         user=(await pool.query(`INSERT INTO users(id,display_name,handle,initials,accent,avatar_emoji) VALUES($1,$2,$3,$4,$5,'🏃') RETURNING *`,[`user-${randomUUID()}`,displayName,`@${handle}`,initials,accents[Math.floor(Math.random()*accents.length)]])).rows[0];created=true;}
       const cookie=await createSession(request,user.id);return json(response,created?201:200,{ok:true,user:publicUser(user),guest:Boolean(providedIdentity)},{'Set-Cookie':cookie});}
     if(request.method==='POST'&&path==='/api/auth/logout'){const token=cookies(request)[sessionCookie];if(token)await pool.query('DELETE FROM user_sessions WHERE token_hash=$1',[hashToken(token)]);return json(response,200,{ok:true},{'Set-Cookie':cookieHeader(request,'',0)});}
+    if(request.method==='GET'&&path==='/api/challenge-templates'){const user=await requireUser(request,response);if(!user)return;await ensureStarterChallengeTemplates(user.id);const result=await pool.query("SELECT * FROM challenge_templates WHERE owner_user_id=$1 AND status='available' ORDER BY (source_kind IN('llm','generated-fallback')) DESC,created_at DESC LIMIT 12",[user.id]);return json(response,200,{ok:true,templates:result.rows});}
+    const assignTemplate=path.match(/^\/api\/challenge-templates\/([^/]+)\/assign$/);
+    if(request.method==='POST'&&assignTemplate){const user=await requireUser(request,response);if(!user)return;const body=await bodyJson(request),template=(await pool.query("SELECT * FROM challenge_templates WHERE id=$1 AND owner_user_id=$2 AND status='available'",[assignTemplate[1],user.id])).rows[0];
+      if(!template)return json(response,404,{error:'Challenge object not found'});const recipient=(await pool.query('SELECT id,display_name FROM users WHERE id=$1 AND is_legacy_placeholder=FALSE',[String(body.recipientUserId||'')])).rows[0];
+      if(!recipient||recipient.id===user.id)return json(response,400,{error:'Choose a friend to challenge'});const requestedAmount=body.pledgeAmountMinor==null?Number(template.suggested_pledge_minor):Math.round(Number(body.pledgeAmountMinor)),pledgeAmount=Math.max(0,Math.min(requestedAmount,Number(template.funding_cap_minor)||100000));
+      if(!Number.isInteger(pledgeAmount))return json(response,400,{error:'Choose a valid pledge commitment'});const dueAt=new Date(body.dueAt||Date.now()+Number(template.duration_days)*86400000);if(!Number.isFinite(dueAt.getTime())||dueAt<=new Date())return json(response,400,{error:'Choose a future due date'});
+      const assignment=(await pool.query(`INSERT INTO challenge_assignments(id,template_id,sender_user_id,recipient_user_id,pledge_amount_minor,currency,due_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`,[`challenge-assignment-${randomUUID()}`,template.id,user.id,recipient.id,pledgeAmount,template.currency,dueAt.toISOString()])).rows[0];return json(response,201,{ok:true,assignment,template,recipient});}
+    const assignmentResponse=path.match(/^\/api\/challenge-assignments\/([^/]+)\/response$/);
+    if(request.method==='PATCH'&&assignmentResponse){const user=await requireUser(request,response);if(!user)return;const body=await bodyJson(request),decision=String(body.decision||'');if(!['accepted','declined'].includes(decision))return json(response,400,{error:'Choose accept or decline'});
+      const result=await pool.query("UPDATE challenge_assignments SET status=$3,responded_at=NOW() WHERE id=$1 AND recipient_user_id=$2 AND status='proposed' RETURNING *",[assignmentResponse[1],user.id,decision]);return result.rows[0]?json(response,200,{ok:true,assignment:result.rows[0]}):json(response,409,{error:'This challenge is no longer awaiting your response'});}
     if(request.method==='GET'&&path==='/api/live/streams'){const result=await pool.query(`SELECT id FROM live_streams WHERE status='live' OR ended_at>NOW()-INTERVAL '6 hours' ORDER BY (status='live') DESC,started_at DESC LIMIT 20`),streams=await Promise.all(result.rows.map(row=>liveStreamDetails(row.id)));return json(response,200,{ok:true,streams});}
     if(request.method==='POST'&&path==='/api/live/streams/start'){const user=await requireUser(request,response);if(!user)return;const body=await bodyJson(request),title=String(body.title||'').trim().slice(0,100),sponsorName=String(body.sponsorName||'SideQuest community').trim().slice(0,80),productName=String(body.productName||'Live run').trim().slice(0,100),productUrl=String(body.productUrl||'').trim().slice(0,500)||null,charityName=String(body.charityName||'Mind').trim().replace(/\s+/g,' ').slice(0,100);
       if(title.length<3||sponsorName.length<2||productName.length<2)return json(response,400,{error:'Add a stream title, sponsor, and featured product'});
@@ -567,7 +670,7 @@ async function handler(request,response){const url=new URL(request.url,'http://a
       const active=await pool.query("SELECT id FROM live_streams WHERE id=$1 AND status='live'",[streamCheer[1]]);if(!active.rows[0])return json(response,409,{error:'This stream has ended'});
       const result=await pool.query('INSERT INTO live_stream_cheers(id,stream_id,sender_user_id,emoji) VALUES($1,$2,$3,$4) RETURNING *',[`stream-cheer-${randomUUID()}`,streamCheer[1],user.id,emoji]),event={type:'cheer',cheer:{...result.rows[0],display_name:user.display_name,handle:user.handle,avatar_emoji:user.avatar_emoji}};const channel=streamChannels.get(streamCheer[1]);if(channel)streamBroadcast(channel,event);return json(response,201,{ok:true,cheer:event.cheer});}
     const streamChallenge=path.match(/^\/api\/live\/streams\/([^/]+)\/challenges$/);
-    if(request.method==='POST'&&streamChallenge){const user=await requireUser(request,response);if(!user)return;const body=await bodyJson(request),amountMinor=Math.round(Number(body.amountMinor)),currency=String(body.currency||'GBP').toUpperCase(),taskType=String(body.taskType||'pace-boost');
+    if(request.method==='POST'&&streamChallenge){const user=await requireUser(request,response);if(!user)return;const body=await bodyJson(request),amountMinor=Math.round(Number(body.amountMinor)),currency=String(body.currency||'GBP').toUpperCase(),templateId=String(body.templateId||''),taskType=templateId?'template':String(body.taskType||'pace-boost');
       if(!Number.isInteger(amountMinor)||amountMinor<100||amountMinor>10000)return json(response,400,{error:'Choose a pledge from £1 to £100'});
       if(currency!=='GBP')return json(response,400,{error:'Live charity pledges currently use GBP'});
       const challengeKinds={
@@ -576,30 +679,32 @@ async function handler(request,response){const url=new URL(request.url,'http://a
         'finish-strong':{paceDelta:-3,message:'Finish the next controlled minute feeling strong'},
         'custom':{paceDelta:0,message:'Complete this friend challenge at a comfortable pace'}
       };
-      if(!challengeKinds[taskType])return json(response,400,{error:'Choose an available live challenge'});
+      const template=templateId?(await pool.query("SELECT * FROM challenge_templates WHERE id=$1 AND owner_user_id=$2 AND status='available'",[templateId,user.id])).rows[0]:null;
+      if(templateId&&!template)return json(response,404,{error:'Challenge object not found'});if(!template&&!challengeKinds[taskType])return json(response,400,{error:'Choose an available live challenge'});
       const stream=(await pool.query("SELECT * FROM live_streams WHERE id=$1 AND status='live'",[streamChallenge[1]])).rows[0];
       if(!stream)return json(response,409,{error:'This live run has ended'});if(stream.broadcaster_user_id===user.id)return json(response,400,{error:'Ask a friend to challenge your live run'});
       const paceResult=await pool.query(`SELECT ROUND(AVG(moving_seconds/(distance_meters/1000.0)))::int AS average_pace_seconds FROM (
         SELECT distance_meters,moving_seconds FROM run_observations WHERE user_id=$1 AND distance_meters>=1000 ORDER BY occurred_at DESC LIMIT 8
-      ) recent_runs`,[stream.broadcaster_user_id]),averagePace=Number(paceResult.rows[0]?.average_pace_seconds)||360,targetPace=Math.max(180,averagePace+challengeKinds[taskType].paceDelta),charityName=String(stream.charity_name||'Mind'),challengeMessage=String(body.message||challengeKinds[taskType].message).trim().replace(/\s+/g,' ').slice(0,120);
+      ) recent_runs`,[stream.broadcaster_user_id]),averagePace=Number(paceResult.rows[0]?.average_pace_seconds)||360,targetPace=Math.max(180,averagePace+(template?0:challengeKinds[taskType].paceDelta)),charityName=String(stream.charity_name||'Mind'),challengeMessage=String(body.message||template?.live_message||challengeKinds[taskType].message).trim().replace(/\s+/g,' ').slice(0,120);
       if(challengeMessage.length<3)return json(response,400,{error:'Add a short challenge message'});
-      const safetyRule='Only attempt this if it feels comfortable. Stop for pain, chest discomfort, dizziness, faintness or unusual breathlessness; a safety stop counts as responsible completion.';
-      const inserted=await pool.query(`INSERT INTO live_run_challenges(id,stream_id,runner_user_id,challenger_user_id,task_type,challenge_message,average_pace_seconds,target_pace_seconds,pledge_amount_minor,currency,charity_name,safety_rule)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,[`live-challenge-${randomUUID()}`,stream.id,stream.broadcaster_user_id,user.id,taskType,challengeMessage,averagePace,targetPace,amountMinor,currency,charityName,safetyRule]);
-      const challenge={id:inserted.rows[0].id,taskType,message:challengeMessage,averagePaceSeconds:averagePace,targetPaceSeconds:targetPace,pledgeAmountMinor:amountMinor,currency,charityName,status:'pledged',safetyRule,createdAt:inserted.rows[0].created_at,challenger:{displayName:user.display_name,avatarEmoji:user.avatar_emoji}};
+      const safetyRule=template?.safety_rule||standardSafetyRule;
+      const inserted=await pool.query(`INSERT INTO live_run_challenges(id,stream_id,runner_user_id,challenger_user_id,task_type,challenge_message,average_pace_seconds,target_pace_seconds,pledge_amount_minor,currency,charity_name,safety_rule,template_id)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,[`live-challenge-${randomUUID()}`,stream.id,stream.broadcaster_user_id,user.id,taskType,challengeMessage,averagePace,targetPace,amountMinor,currency,charityName,safetyRule,template?.id||null]);
+      const challenge={id:inserted.rows[0].id,templateId:template?.id||null,templateTitle:template?.title||null,taskType,message:challengeMessage,averagePaceSeconds:averagePace,targetPaceSeconds:targetPace,pledgeAmountMinor:amountMinor,currency,charityName,status:'pledged',safetyRule,createdAt:inserted.rows[0].created_at,challenger:{displayName:user.display_name,avatarEmoji:user.avatar_emoji}};
       const channel=streamChannels.get(stream.id);if(channel)streamBroadcast(channel,{type:'challenge',challenge});return json(response,201,{ok:true,challenge,paymentStatus:'pledge-only-not-charged'});}
     const liveChallengeResponse=path.match(/^\/api\/live\/challenges\/([^/]+)\/response$/);
     if(request.method==='PATCH'&&liveChallengeResponse){const user=await requireUser(request,response);if(!user)return;const body=await bodyJson(request),decision=String(body.decision||'');
       if(!['accepted','declined'].includes(decision))return json(response,400,{error:'Choose accept or decline'});
       const updated=await pool.query(`UPDATE live_run_challenges SET status=$3 WHERE id=$1 AND runner_user_id=$2 AND status='pledged' RETURNING *`,[liveChallengeResponse[1],user.id,decision]);
       if(!updated.rows[0])return json(response,409,{error:'This challenge is no longer awaiting your response'});
-      const row=updated.rows[0],challenger=(await pool.query('SELECT display_name,avatar_emoji FROM users WHERE id=$1',[row.challenger_user_id])).rows[0];
-      const challenge={id:row.id,taskType:row.task_type,message:row.challenge_message,averagePaceSeconds:row.average_pace_seconds,targetPaceSeconds:row.target_pace_seconds,pledgeAmountMinor:row.pledge_amount_minor,currency:row.currency,charityName:row.charity_name,status:row.status,safetyRule:row.safety_rule,createdAt:row.created_at,challenger:{displayName:challenger.display_name,avatarEmoji:challenger.avatar_emoji}};
+      const row=updated.rows[0],[challenger,template]=await Promise.all([pool.query('SELECT display_name,avatar_emoji FROM users WHERE id=$1',[row.challenger_user_id]),row.template_id?pool.query('SELECT title FROM challenge_templates WHERE id=$1',[row.template_id]):Promise.resolve({rows:[]})]);
+      const challenge={id:row.id,templateId:row.template_id,templateTitle:template.rows[0]?.title||null,taskType:row.task_type,message:row.challenge_message,averagePaceSeconds:row.average_pace_seconds,targetPaceSeconds:row.target_pace_seconds,pledgeAmountMinor:row.pledge_amount_minor,currency:row.currency,charityName:row.charity_name,status:row.status,safetyRule:row.safety_rule,createdAt:row.created_at,challenger:{displayName:challenger.rows[0].display_name,avatarEmoji:challenger.rows[0].avatar_emoji}};
       const channel=streamChannels.get(row.stream_id);if(channel)streamBroadcast(channel,{type:'challenge-response',challenge});return json(response,200,{ok:true,challenge});}
     if(request.method==='GET'&&path==='/api/feedback-loop'){const user=await requireUser(request,response);if(!user)return;const loop=await getLoop(user.id);return loop?json(response,200,loop):json(response,404,{error:'User not found'});}
     if(request.method==='GET'&&path==='/api/agent-godoy/export'){const user=await requireUser(request,response);if(!user)return;const loop=await getLoop(user.id);if(!loop)return json(response,404,{error:'User not found'});
       const payload={exportedAt:new Date().toISOString(),schemaVersion:'agent-godoy-v1',user:{id:loop.user.id,displayName:loop.user.display_name},source:loop.source,
-        additionalContext:loop.contextEntries,assessment:loop.agentAssessment,activeChallenge:loop.intervention,pledges:loop.pledges,disclaimer:loop.disclaimer};
+        additionalContext:loop.contextEntries,assessment:loop.agentAssessment,challengeTemplates:loop.challengeTemplates,challengeAssignments:loop.challengeAssignments,
+        liveChallenges:loop.liveChallenges,activeChallenge:loop.intervention,pledges:loop.pledges,disclaimer:loop.disclaimer};
       response.writeHead(200,{'Content-Type':'application/json; charset=utf-8','Content-Disposition':'attachment; filename="agent-godoy-export.json"','Cache-Control':'no-store'});return response.end(JSON.stringify(payload,null,2));}
     if(request.method==='POST'&&path==='/api/agent-godoy/analyse'){const user=await requireUser(request,response);if(!user)return;await bodyJson(request);await analyse(user.id);const assessment=await runAndPersistGodoy(user.id,{allowModel:true});return json(response,201,{ok:true,assessment});}
     if(request.method==='POST'&&path==='/api/context'){const user=await requireUser(request,response);if(!user)return;const body=await bodyJson(request),userId=user.id,entry=parseInput(ContextEntryInputSchema,{category:body.category,label:body.label,value:body.value});
@@ -764,7 +869,7 @@ async function handleUpgrade(request,socket,head) {
   }catch(error){console.error('WebSocket upgrade failed',error);socket.destroy();}
 }
 
-async function start(){await ensureSchema();const source=await importStrava();await ensureOwnerDiagnostics();
+async function start(){await ensureSchema();const source=await importStrava();await ensureOwnerDiagnostics();await ensureOwnerChallengeCatalog();
   await pool.query("UPDATE live_streams SET status='recovering' WHERE status='live'");
   setTimeout(()=>pool.query("UPDATE live_streams SET status='ended',ended_at=COALESCE(ended_at,NOW()) WHERE status='recovering'").catch(console.error),60000).unref();
   const server=http.createServer(handler);server.on('upgrade',handleUpgrade);server.listen(port,'0.0.0.0',()=>console.log(`SideQuest feedback API listening on ${port}; Strava ${source.available?'available':'unavailable'}, ${source.imported} runs synchronized`));}

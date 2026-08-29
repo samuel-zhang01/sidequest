@@ -99,10 +99,15 @@ test('Me and Watch others keep a sustained run, cockpit, challenges, and reactio
     await expect(runner.locator('#broadcast-reaction-overlay')).toContainText('🔥', { timeout: 10000 });
     await expect(runner.locator('#broadcast-reaction-overlay')).toContainText(viewerName);
 
+    await expect(viewer.locator('#live-challenge-template option')).toHaveCount(4);
+    const templateId=await viewer.locator('#live-challenge-template option').nth(1).getAttribute('value');
+    await viewer.locator('#live-challenge-template').selectOption(templateId);
+    const templateMessage=await viewer.locator('#live-challenge-message').inputValue();
     await viewer.locator('#live-challenge-amount').fill('9');
     await viewer.locator('#live-challenge-form button').click();
     await expect(viewer.locator('#watch-status')).toContainText('Challenge delivered');
     await expect(runner.locator('#broadcast-challenge-overlay')).toContainText(viewerName, { timeout: 10000 });
+    await expect(runner.locator('#broadcast-challenge-overlay')).toContainText(templateMessage);
     await expect(runner.locator('#broadcast-challenge-overlay')).toContainText('£9.00');
     await expect(runner.locator('#broadcast-challenge-overlay')).toContainText('Mind');
 

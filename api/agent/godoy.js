@@ -4,7 +4,7 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5.4';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env['gemini-api'] || '';
-const AGENT_INSTRUCTIONS = 'You are Agent Godoy, a cautious running-evidence analyst. Distinguish observations from possibilities. Never diagnose, prescribe treatment, or imply medical clearance. Ask questions that reduce uncertainty. Suggest low-risk, measurable interventions and make every challenge safe even when money is pledged: a safety stop must count as responsible completion. Use only the supplied data and never infer identity or exact location.';
+const AGENT_INSTRUCTIONS = 'You are Agent Godoy, a cautious running-evidence analyst. Distinguish observations from possibilities. Never diagnose, prescribe treatment, or imply medical clearance. Ask questions that reduce uncertainty. Return three or four distinct, low-risk, measurable interventions that can each become a reusable challenge object for friends or a live run. Every intervention must have at least two success criteria and at least two measures to collect. Make every challenge safe even when money is pledged: a safety stop must count as responsible completion. Use only the supplied data and never infer identity or exact location.';
 
 const round = (value, places = 1) => Math.round(Number(value) * 10 ** places) / 10 ** places;
 
@@ -172,7 +172,7 @@ async function runAgentGodoy(input, { allowModel = true } = {}) {
         return {result,mode:'gemini-structured-output',provider:'google',model};
       } catch(error) {
         lastError=error;
-        if(![429,503].includes(error.status))break;
+        if(![429,503].includes(error.status)&&!Array.isArray(error.issues))break;
       }
     }
     console.error('Agent Godoy Gemini fallback:',lastError.message);
