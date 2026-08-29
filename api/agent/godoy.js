@@ -1,7 +1,10 @@
 const { AgentGodoyOutputSchema, agentGodoyJsonSchema } = require('./contracts');
 
-const MODEL = process.env.OPENAI_MODEL || 'gpt-5.4';
-const API_KEY = process.env.OPENAI_API_KEY || '';
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5.4';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env['gemini-api'] || '';
+const AGENT_INSTRUCTIONS = 'You are Agent Godoy, a cautious running-evidence analyst. Distinguish observations from possibilities. Never diagnose, prescribe treatment, or imply medical clearance. Ask questions that reduce uncertainty. Suggest low-risk, measurable interventions and make every challenge safe even when money is pledged: a safety stop must count as responsible completion. Use only the supplied data and never infer identity or exact location.';
 
 const round = (value, places = 1) => Math.round(Number(value) * 10 ** places) / 10 ** places;
 
@@ -99,18 +102,27 @@ function modelInput({ context, snapshot, additionalContext }) {
   };
 }
 
-async function callModel(input) {
+function geminiSchema(value) {
+  if(Array.isArray(value))return value.map(geminiSchema);
+  if(!value||typeof value!=='object')return value;
+  const supported=new Set(['type','properties','required','enum','items','title','description']);
+  return Object.fromEntries(Object.entries(value).filter(([key])=>supported.has(key)).map(([key,item])=>[
+    key,key==='properties'?Object.fromEntries(Object.entries(item).map(([name,schema])=>[name,geminiSchema(schema)])):geminiSchema(item)
+  ]));
+}
+
+async function callOpenAI(input) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 25000);
   try {
     const response = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MODEL,
+        model: OPENAI_MODEL,
         store: false,
-        instructions: 'You are Agent Godoy, a cautious running-evidence analyst. Distinguish observations from possibilities. Never diagnose, prescribe treatment, or imply medical clearance. Ask questions that reduce uncertainty. Suggest low-risk, measurable interventions and make every challenge safe even when money is pledged: a safety stop must count as responsible completion. Use only the supplied data and never infer identity or exact location.',
+        instructions: AGENT_INSTRUCTIONS,
         input: JSON.stringify(input),
         text: { format: { type: 'json_schema', name: 'agent_godoy_assessment', strict: true, schema: agentGodoyJsonSchema } },
       }),
@@ -125,15 +137,54 @@ async function callModel(input) {
   }
 }
 
+async function callGemini(input,model) {
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),50000);
+  try {
+    const response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{
+      method:'POST',
+      headers:{'x-goog-api-key':GEMINI_API_KEY,'Content-Type':'application/json'},
+      signal:controller.signal,
+      body:JSON.stringify({
+        systemInstruction:{parts:[{text:AGENT_INSTRUCTIONS}]},
+        contents:[{role:'user',parts:[{text:JSON.stringify(input)}]}],
+        generationConfig:{responseMimeType:'application/json',responseJsonSchema:geminiSchema(agentGodoyJsonSchema),temperature:0.2,maxOutputTokens:6000},
+      }),
+    });
+    const payload=await response.json().catch(()=>({}));
+    if(!response.ok){const error=new Error(`Gemini request failed with status ${response.status} (${payload.error?.status||'unknown'}): ${String(payload.error?.message||'no detail').slice(0,600)}`);error.status=response.status;throw error;}
+    const outputText=payload.candidates?.[0]?.content?.parts?.filter(part=>typeof part.text==='string').map(part=>part.text).join('');
+    if(!outputText)throw new Error(`Gemini returned no structured output (${payload.candidates?.[0]?.finishReason||'unknown'})`);
+    return AgentGodoyOutputSchema.parse(JSON.parse(outputText));
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function runAgentGodoy(input, { allowModel = true } = {}) {
   const fallback = deterministicAssessment(input);
-  if (!allowModel || !API_KEY) return { result: fallback, mode: 'deterministic-fallback', provider: null, model: null };
+  if (!allowModel) return { result: fallback, mode: 'deterministic-fallback', provider: null, model: null };
+  if(GEMINI_API_KEY){
+    const models=[...new Set([GEMINI_MODEL,'gemini-3.7-flash'])];let lastError;
+    for(const model of models){
+      try {
+        const result=await callGemini(modelInput(input),model);
+        return {result,mode:'gemini-structured-output',provider:'google',model};
+      } catch(error) {
+        lastError=error;
+        if(![429,503].includes(error.status))break;
+      }
+    }
+    console.error('Agent Godoy Gemini fallback:',lastError.message);
+    return {result:fallback,mode:'deterministic-fallback',provider:'google-unavailable',model:GEMINI_MODEL};
+  }
+  if (!OPENAI_API_KEY) return { result: fallback, mode: 'deterministic-fallback', provider: null, model: null };
   try {
-    const result = await callModel(modelInput(input));
-    return { result, mode: 'openai-structured-output', provider: 'openai', model: MODEL };
+    const result = await callOpenAI(modelInput(input));
+    return { result, mode: 'openai-structured-output', provider: 'openai', model: OPENAI_MODEL };
   } catch (error) {
     console.error('Agent Godoy model fallback:', error.message);
-    return { result: fallback, mode: 'deterministic-fallback', provider: 'openai-unavailable', model: MODEL };
+    return { result: fallback, mode: 'deterministic-fallback', provider: 'openai-unavailable', model: OPENAI_MODEL };
   }
 }
 

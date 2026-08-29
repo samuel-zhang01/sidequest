@@ -4,6 +4,8 @@ dist/
 build/
 coverage/
 .cache/
+test-results/
+playwright-report/
 
 # Environment and secrets
 .env

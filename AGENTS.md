@@ -10,9 +10,14 @@ infrastructure collaborator—not as a generic code generator.
 1. Read [`infrastructure.md`](infrastructure.md) in full. It is the authority
    for hosting, ports, Cloudflare, Docker, secrets, and engine access.
 2. Read [`README.md`](README.md) for the runnable demo stack.
-3. For pitch, product, or event work, read
+3. Read [`achievements.md`](achievements.md) for the unified cross-agent product
+   and implementation handoff. Update it with verified material changes.
+4. Read [`design-notes.md`](design-notes.md) before changing navigation, page
+   structure, UI copy, domain objects, or feature placement. It is the shared
+   product and interface contract.
+5. For pitch, product, or event work, read
    [`judging-criteria/judging-criteria.md`](judging-criteria/judging-criteria.md).
-4. Inspect `git status --short` before editing. Preserve pre-existing user
+6. Inspect `git status --short` before editing. Preserve pre-existing user
    changes and never revert or overwrite unrelated work.
 
 ## Non-negotiable infrastructure rules

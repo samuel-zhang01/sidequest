@@ -12,6 +12,7 @@ services:
     volumes:
       - ./index.html:/usr/share/nginx/html/index.html:ro
       - ./live.html:/usr/share/nginx/html/live.html:ro
+      - ./live.js:/usr/share/nginx/html/live.js:ro
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/health"]
@@ -30,15 +31,21 @@ services:
 
   api:
     image: node:22-alpine
+    # Load private backend credentials only into the private API container.
+    # Agent Godoy accepts standard GEMINI_API_KEY and the existing gemini-api alias.
+    env_file:
+      - .env
     working_dir: /app
     command: sh -c "npm install --omit=dev --no-audit --no-fund && node server.js"
     environment:
       PORT: "8080"
       DATABASE_URL: postgresql://${POSTGRES_USER:-whisperflow}:${POSTGRES_PASSWORD:-change-me-before-any-real-deploy}@db:5432/${POSTGRES_DB:-whisperflow}
       STRAVA_ACTIVITIES_PATH: /data/strava/activities.csv
+      STRAVA_OWNER_USER_ID: ${STRAVA_OWNER_USER_ID:-user-alex}
       # Optional: when absent, Agent Godoy uses the same validated deterministic contract.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.6-flash}
     depends_on:
       db:
         condition: service_healthy

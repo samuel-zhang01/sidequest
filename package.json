@@ -9,6 +9,11 @@
     "start": "docker compose up -d",
     "down": "docker compose down",
     "logs": "docker compose logs -f",
-    "status": "docker compose ps"
+    "status": "docker compose ps",
+    "test:navigation": "playwright test tests/navigation.spec.js --workers=1",
+    "test:live": "playwright test tests/live-phone.spec.js tests/live-modes.spec.js --workers=1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.55.0"
   }
 }

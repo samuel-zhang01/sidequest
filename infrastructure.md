@@ -245,6 +245,12 @@ the browser-facing URL is HTTPS: Cloudflare terminates that TLS connection.
 * Confirmed: `https://genesis.hiddenlayers.co.uk/` returns `HTTP 200` over
   public HTTPS. The working connector target is
   `http://192.168.1.3:6969`.
+* Confirmed: the public `/live` page and authenticated `wss://` upgrade work
+  through Cloudflare. A browser-level test relayed actual MediaRecorder camera
+  output to an automatically joined viewer and buffered it through MediaSource.
+* Confirmed: the private API receives the configured Gemini credential, and a
+  real Agent Godoy request persisted Zod-validated structured output from
+  `gemini-3.6-flash`. The credential value was not exposed during verification.
 * Observed: no active `cloudflared` process or `cloudflared.service` is present
   on the controller or engine. The active connector is therefore elsewhere and
   must use the engine-to-controller HTTP target above.
