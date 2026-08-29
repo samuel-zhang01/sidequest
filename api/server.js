@@ -209,7 +209,7 @@ async function analyse(userId,triggerType='analysis',triggerRef=null,postResult=
     snapshot.confidenceScore=clamp(snapshot.confidenceScore+5,0,100);snapshot.confidenceLabel=snapshot.confidenceScore>=75?'good coverage':'partial coverage';}
   const result=await pool.query(`INSERT INTO health_snapshots(user_id,state_label,confidence_label,confidence_score,insight,interpretation,evidence,data_gaps,engine_mode,trigger_type,trigger_ref)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,'deterministic-poc',$9,$10) RETURNING *`,
-    [userId,snapshot.stateLabel,snapshot.confidenceLabel,snapshot.confidenceScore,snapshot.insight,snapshot.interpretation,snapshot.evidence,snapshot.dataGaps,triggerType,triggerRef]);
+    [userId,snapshot.stateLabel,snapshot.confidenceLabel,snapshot.confidenceScore,snapshot.insight,snapshot.interpretation,snapshot.evidence,JSON.stringify(snapshot.dataGaps),triggerType,triggerRef]);
   await pool.query(`INSERT INTO engine_runs(user_id,purpose,mode,input_context,result) VALUES($1,'running-state','deterministic-poc',$2,$3)`,
     [userId,{observationCount:context.summary.run_count,latestRunAt:context.summary.latest_run_at},snapshot]);
   return result.rows[0];
@@ -228,7 +228,7 @@ async function generateIntervention(userId,force=false) {
     stop:'Stop rather than complete the challenge for pain, chest discomfort, dizziness, faintness or unusual breathlessness. Seek appropriate medical care when symptoms warrant it.'};
   const result=await pool.query(`INSERT INTO interventions(id,snapshot_id,user_id,title,question,hypothesis,instructions,target_distance_meters,success_criteria,measures_to_collect,safety_stop,generated_by,due_at)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'deterministic-poc',NOW()+INTERVAL '7 days') RETURNING *`,
-    [item.id,snapshot.rows[0].id,userId,item.title,item.question,item.hypothesis,item.instructions,item.target,item.criteria,item.measures,item.stop]);
+    [item.id,snapshot.rows[0].id,userId,item.title,item.question,item.hypothesis,item.instructions,item.target,JSON.stringify(item.criteria),JSON.stringify(item.measures),item.stop]);
   await pool.query(`INSERT INTO engine_runs(user_id,purpose,mode,input_context,result) VALUES($1,'intervention','deterministic-poc',$2,$3)`,
     [userId,{snapshotId:snapshot.rows[0].id,typicalDistanceMeters:typical},item]);
   return result.rows[0];
@@ -301,7 +301,7 @@ async function handler(request,response){const url=new URL(request.url,'http://a
       const result=await pool.query(`INSERT INTO intervention_results(id,intervention_id,actual_distance_meters,moving_seconds,perceived_exertion,symptoms,outcome_label,outcome_summary)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(intervention_id) DO UPDATE SET actual_distance_meters=EXCLUDED.actual_distance_meters,moving_seconds=EXCLUDED.moving_seconds,
         perceived_exertion=EXCLUDED.perceived_exertion,symptoms=EXCLUDED.symptoms,outcome_label=EXCLUDED.outcome_label,outcome_summary=EXCLUDED.outcome_summary,created_at=NOW() RETURNING *`,
-        [`result-${randomUUID()}`,resultMatch[1],outcome.distance,outcome.seconds,outcome.rpe,outcome.symptoms,outcome.label,outcome.summary]);await pool.query("UPDATE interventions SET status='completed' WHERE id=$1",[resultMatch[1]]);return json(response,201,{ok:true,result:result.rows[0]});}
+        [`result-${randomUUID()}`,resultMatch[1],outcome.distance,outcome.seconds,outcome.rpe,JSON.stringify(outcome.symptoms),outcome.label,outcome.summary]);await pool.query("UPDATE interventions SET status='completed' WHERE id=$1",[resultMatch[1]]);return json(response,201,{ok:true,result:result.rows[0]});}
     const reassess=path.match(/^\/api\/interventions\/([^/]+)\/reassess$/);
     if(request.method==='POST'&&reassess){const intervention=await pool.query('SELECT * FROM interventions WHERE id=$1',[reassess[1]]),result=await pool.query('SELECT * FROM intervention_results WHERE intervention_id=$1',[reassess[1]]);if(!intervention.rows[0]||!result.rows[0])return json(response,409,{error:'Record an outcome before reassessing'});
       const snapshot=await analyse(intervention.rows[0].user_id,'post-intervention',reassess[1],result.rows[0]);await pool.query("UPDATE interventions SET status='assessed' WHERE id=$1",[reassess[1]]);return json(response,201,{ok:true,snapshot});}
