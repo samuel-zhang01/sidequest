@@ -112,6 +112,9 @@ def main():
             else:
                 raise RuntimeError('Generated fixture stack did not become ready')
             assert status['generationMode'] == 'deterministic-fallback'
+            # The maintained social-navigation fixture expects an existing
+            # peer. Create it through the real API in this disposable database.
+            api('/api/auth/join', {'identity': 'CI Fixture Friend'})
             _, cookie = api('/api/auth/join', {})
             assert cookie
             # Seed the documented starter+generated challenge contract through
