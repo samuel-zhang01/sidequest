@@ -50,6 +50,10 @@ def main():
                      'api/agent/contracts.js', 'api/agent/godoy.js',
                      'api/package.json', 'api/package-lock.json'):
             shutil.copyfile(ROOT / name, source / name)
+        # Nginx's unprivileged workers must be able to read these public
+        # assets. The private temporary parent and generated data stay 0700/0600.
+        for name in ('index.html', 'live.html', 'live.js'):
+            (source / name).chmod(0o644)
         shutil.copyfile(ROOT / 'nginx/default.conf', source / 'nginx.conf')
         for name in ('live.js', 'api/server.js', 'api/agent/contracts.js', 'api/agent/godoy.js'):
             run(['node', '--check', source / name])
