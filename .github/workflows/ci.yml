@@ -1,0 +1,32 @@
+name: Synthetic CI
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sidequest-local-ci
+  cancel-in-progress: false
+jobs:
+  browser:
+    if: github.repository == 'samuel-zhang01/sidequest' && github.ref == 'refs/heads/main'
+    runs-on: [deploy-vps, sidequest]
+    timeout-minutes: 30
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/sidequest-browsers
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium
+      - name: Source, private database and complete maintained browser gates
+        run: python3 scripts/ci_synthetic.py
+      - name: Remove disposable browser package
+        if: always()
+        run: rm -rf "$PLAYWRIGHT_BROWSERS_PATH"

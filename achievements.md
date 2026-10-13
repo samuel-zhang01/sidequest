@@ -1,5 +1,15 @@
 # SideQuest / Agent Godoy — unified agent memory
 
+## Local CI implementation — 2026-10-13
+
+Trusted main/explicit-main CI is routed to the repository's local Linux
+runner. The source-only CI helper uses generated activity data, empty provider
+keys, a private disposable database and all maintained browser regression
+scripts. It never loads the deployed export or environment, publishes only
+loopback port6969 and cleans up only its random test project. Actual GitHub
+run evidence is retained in the separate security audit workspace; this
+implementation entry does not claim a production deployment or completed run.
+
 This is the concise, shared handoff for Codex agents working in this repository.
 Read it after `infrastructure.md` and `README.md`. Update it whenever a task
 materially changes the product contract, architecture, verified state, or known
